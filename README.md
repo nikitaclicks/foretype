@@ -15,11 +15,47 @@ supports two completion backends:
   `/v1/chat/completions` contract (local servers like Ollama / MLX, or remote
   providers).
 
-This repository currently contains **specifications only**. The `docs/` folder
-is the source of truth for the intended product and architecture; an
-implementing agent should read it in order before writing code.
+## At a glance
 
-## Reading order
+- **Platform:** macOS (Apple Silicon), SwiftUI + AppKit, agent app (`LSUIElement`).
+- **Permissions:** Accessibility and Input Monitoring. No Screen Recording.
+- **Dependencies:** none beyond Apple frameworks. No third-party packages.
+- **Accept gesture:** `Tab` accepts the next word/chunk; the rest stays as ghost text.
+- **Privacy:** the default backend runs on-device; nothing leaves the machine
+  unless you configure a remote HTTP endpoint.
+
+## Build and run
+
+Requires Xcode (with a recent macOS SDK) on Apple Silicon.
+
+```sh
+./run.sh
+```
+
+`run.sh` builds the app with Apple Development signing into `build/`, links a
+double-clickable `./Foretype.app` at the repo root, quits any running instance,
+and launches the fresh build. Signing with a real identity matters: macOS ties
+the Accessibility / Input Monitoring grants to the app's signature, so the
+permissions you grant once persist across rebuilds.
+
+You can also build from Xcode directly — open `Foretype.xcodeproj` and run the
+`Foretype` scheme.
+
+### First launch
+
+Foretype appears only in the menu bar (top-right). On first run, grant it:
+
+1. **Accessibility** — to read the focused text field and caret geometry.
+2. **Input Monitoring** — to observe typing and the `Tab` accept gesture.
+
+Then pick a backend from the menu bar (Apple Intelligence, or enter an
+OpenAI-compatible HTTP endpoint), and start typing in any text field.
+
+## Documentation
+
+The `docs/` folder is the design source of truth — architecture, the completion
+state machine, engine contracts, and rationale. An implementing or contributing
+agent should read it in order:
 
 1. [`docs/00-overview.md`](docs/00-overview.md) — what it is, goals, non-goals, principles
 2. [`docs/01-architecture.md`](docs/01-architecture.md) — module map, lifecycle, threading model
@@ -42,7 +78,6 @@ For a fresh agent pointed at this repo, [`AGENTS.md`](AGENTS.md) is the entry
 point: orientation, hard invariants, and the reading order above.
 
 ## At a glance
-
 - **Platform:** macOS (Apple Silicon), SwiftUI + AppKit, agent app (`LSUIElement`).
 - **Permissions:** Accessibility and Input Monitoring. No Screen Recording.
 - **Dependencies:** none beyond Apple frameworks. No third-party packages.
