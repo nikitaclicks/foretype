@@ -1,0 +1,16 @@
+# Build output
+/build/
+/Foretype.app
+/.build/
+DerivedData/
+*.xcuserstate
+
+# macOS
+.DS_Store
+
+# Xcode user-specific
+xcuserdata/
+
+# Local agent/editor state
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
