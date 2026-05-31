@@ -50,6 +50,36 @@ struct FocusSnapshot: Equatable, Sendable {
     let trailingText: String
     let selection: NSRange
     let caret: CaretGeometry?
+    /// The focused field's on-screen frame (Cocoa coords), used to anchor the
+    /// ghost-text overlay. AX reports this far more reliably than the caret rect,
+    /// so it is the primary positioning source (doc 03 / 08).
+    let fieldRect: CGRect?
     let isSecure: Bool
     let capability: FocusCapability
+
+    init(
+        identity: FocusIdentity,
+        appName: String,
+        role: String,
+        subrole: String?,
+        precedingText: String,
+        trailingText: String,
+        selection: NSRange,
+        caret: CaretGeometry?,
+        fieldRect: CGRect? = nil,
+        isSecure: Bool,
+        capability: FocusCapability
+    ) {
+        self.identity = identity
+        self.appName = appName
+        self.role = role
+        self.subrole = subrole
+        self.precedingText = precedingText
+        self.trailingText = trailingText
+        self.selection = selection
+        self.caret = caret
+        self.fieldRect = fieldRect
+        self.isSecure = isSecure
+        self.capability = capability
+    }
 }

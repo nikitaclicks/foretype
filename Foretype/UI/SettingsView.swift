@@ -231,8 +231,10 @@ private struct BackendSettingsTab: View {
     /// Minimal one-shot probe of the chat-completions endpoint. Returns a
     /// human-readable success/failure. Off the main actor.
     private static func probe(baseURL: String, model: String, apiKey: String?) async -> TestResult {
-        let trimmed = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
-        guard let url = URL(string: "\(trimmed)/v1/chat/completions") else {
+        // Resolve the endpoint the SAME way the engine does, so Test and live
+        // completions agree (tolerates an included /v1, trailing slash, etc.).
+        guard let urlString = OpenAIEngine.chatCompletionsURLString(base: baseURL),
+              let url = URL(string: urlString) else {
             return .failure("Invalid base URL")
         }
         var request = URLRequest(url: url)

@@ -42,35 +42,57 @@ extension CompletionCoordinator {
 
     // MARK: FocusSnapshot
 
-    /// React to a freshly resolved focus snapshot. An identity change ends the
-    /// current session and re-evaluates for the new field; a geometry-only change
-    /// within the same field just repositions the ghost text.
+    /// React to a freshly resolved focus snapshot.
+    ///
+    /// Critically, a snapshot for the *same* field is NOT a trigger to tear down
+    /// work: when the user types, the keyboard tap schedules a generation debounce
+    /// and then — a poll interval later — the focus watcher publishes a snapshot
+    /// reflecting that same typed text. Cancelling here would kill the debounce the
+    /// keystroke just scheduled, so typing would never produce a suggestion until
+    /// the field was re-focused. Only a genuine focus change (different field) or a
+    /// field that has become unusable resets the pipeline.
     func handleFocusSnapshot(_ snapshot: FocusSnapshot) {
-        if session != nil, isPreviewing, let prior = pendingSnapshot,
-           prior.identity == snapshot.identity {
-            // Same field, still previewing: a geometry-only update → reposition.
-            if let geometry = overlayGeometry(for: snapshot) {
-                pendingSnapshot = snapshot
-                overlay.reposition(geometry: geometry)
-            }
+        let sameField = (lastFocusIdentity == snapshot.identity)
+        lastFocusIdentity = snapshot.identity
+
+        // Genuine change of focused field (or the very first focus): abandon the
+        // session and any in-flight work, then re-evaluate for the new field.
+        guard sameField else {
+            work.cancelAll()
+            endSession(hideReason: "focus changed")
+            reevaluateAvailability()
             return
         }
 
-        // Identity changed (or no active preview): end session, hide, re-eval.
-        work.cancelAll()
-        endSession(hideReason: "focus changed")
-        reevaluateAvailability()
+        // Same field, but no longer usable (became secure / unsupported): drop
+        // everything and surface the disabled reason.
+        guard snapshot.capability == .supported, !snapshot.isSecure else {
+            work.cancelAll()
+            endSession(hideReason: "field no longer usable")
+            reevaluateAvailability()
+            return
+        }
+
+        // Same usable field, just updated. Leave any pending generation alone. If a
+        // preview is on screen, follow the caret / field with a reposition so the
+        // ghost text tracks typing-driven caret motion and window drags.
+        if isPreviewing, session != nil, let geometry = overlayGeometry(for: snapshot) {
+            pendingSnapshot = snapshot
+            overlay.reposition(geometry: geometry)
+        }
     }
 
     // MARK: Geometry helper
 
-    /// Build an `OverlayGeometry` from a snapshot's caret, or `nil` if there is no
-    /// usable caret rectangle. Never force-unwraps AX data.
+    /// Build an `OverlayGeometry` for anchoring the ghost text to the focused
+    /// field (AX reports the field frame reliably, unlike the caret). The caret
+    /// rect is passed through when present for optional refinement, but the field
+    /// rect is the anchor. Returns `nil` if there's no field rect to anchor to.
     func overlayGeometry(for snapshot: FocusSnapshot) -> OverlayGeometry? {
         guard let caret = snapshot.caret else { return nil }
         return OverlayGeometry(
             caretRect: caret.rect,
-            fieldRect: nil,
+            fieldRect: snapshot.fieldRect,
             quality: caret.quality
         )
     }

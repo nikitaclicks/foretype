@@ -93,32 +93,44 @@ final class GhostTextOverlay: OverlayPresenting {
     /// Lay out the panel for the given text + geometry and push fresh content
     /// into the reused hosting view.
     private func render(text: String, geometry: OverlayGeometry) {
+        let color = resolvedColor()
+        let caretRect = geometry.caretRect
         let fontSize = fontSize(for: geometry)
         let font = NSFont.systemFont(ofSize: fontSize)
-        let color = resolvedColor()
 
-        let caretRect = geometry.caretRect
+        // Vertical/horizontal placement nudges. Defaults are tuned for the common
+        // case; both are overridable without a code change (positive vertical =
+        // up, positive horizontal = right), then relaunch:
+        //   defaults write com.foretype.Foretype ghostVerticalOffset -14
+        //   defaults write com.foretype.Foretype ghostHorizontalOffset 0
+        let defaults = UserDefaults.standard
+        // Read tolerantly: `defaults write … ghostVerticalOffset -14` stores a
+        // STRING, which `as? Double` would silently drop (falling back to the
+        // default). `double(forKey:)` coerces numeric strings, so honor the
+        // override whenever the key is present in any numeric form.
+        func tunable(_ key: String, default fallback: CGFloat) -> CGFloat {
+            guard defaults.object(forKey: key) != nil else { return fallback }
+            return CGFloat(defaults.double(forKey: key))
+        }
+        let vOffset = tunable("ghostVerticalOffset", default: -14)
+        let hOffset = tunable("ghostHorizontalOffset", default: 0)
+
         // Anchor at the caret's trailing edge, on the caret line.
-        let originX = caretRect.maxX + leadingGap
+        let originX = caretRect.maxX + leadingGap + hOffset
 
-        // Decide whether the text overflows the right screen edge; if so, wrap
-        // back to the field's left edge (kept deliberately simple).
+        // Wrap back to the field's left edge if the run would overflow the screen.
         let screenMaxX = screenMaxX(for: caretRect)
         let availableWidth = max(0, screenMaxX - originX)
-        let measuredWidth = measuredWidth(text, font: font)
+        let measured = measuredWidth(text, font: font)
 
         let wrapWidth: CGFloat?
         let frameWidth: CGFloat
         let frameOriginX: CGFloat
-
-        if measuredWidth <= availableWidth || availableWidth <= 0 {
-            // Fits on the line: single-line run sized to the text.
+        if measured <= availableWidth || availableWidth <= 0 {
             wrapWidth = nil
-            frameWidth = max(1, measuredWidth)
+            frameWidth = max(1, measured)
             frameOriginX = originX
         } else {
-            // Overflow: wrap. Prefer the field's left edge as the wrap origin so
-            // continuation lines align with the field; fall back to the caret.
             let wrapOriginX = geometry.fieldRect?.minX ?? originX
             let wrapRight = geometry.fieldRect?.maxX ?? screenMaxX
             let width = max(1, wrapRight - wrapOriginX)
@@ -135,14 +147,12 @@ final class GhostTextOverlay: OverlayPresenting {
             wrapWidth: wrapWidth
         )
 
-        // Size the panel to fit the (possibly wrapped) content.
-        let fittingHeight = hostingView.fittingSize.height
-        let lineHeight = max(caretRect.height, font.ascender - font.descender)
-        let frameHeight = max(lineHeight, fittingHeight)
+        let frameHeight = max(1, hostingView.fittingSize.height)
 
-        // Vertically align to the caret line. In Cocoa screen coords the origin
-        // is bottom-left, so match the caret's bottom edge.
-        let frameOriginY = caretRect.minY
+        // Bottom-align the run to the caret's bottom (single line) or anchor the
+        // first wrapped line to the caret top, then apply the tunable offset.
+        let baseY = (wrapWidth == nil) ? caretRect.minY : caretRect.maxY - frameHeight
+        let frameOriginY = baseY + vOffset
 
         let frame = NSRect(
             x: frameOriginX,

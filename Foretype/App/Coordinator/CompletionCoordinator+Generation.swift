@@ -33,6 +33,14 @@ extension CompletionCoordinator {
     /// Fired when the debounce settles with no newer mutation. Mints a freshness
     /// token, snapshots focus, builds the request, and launches the engine call.
     func beginGeneration() {
+        // Force a synchronous focus re-read first. `focus.current` is refreshed by
+        // a poll timer and can lag up to one interval behind the keystroke that
+        // scheduled this cycle; snapshotting it as-is risks building the request
+        // against stale preceding text, which then fails the freshness re-check on
+        // return and is silently dropped (with nothing to reschedule it). The
+        // refresh guarantees we capture the latest typed text.
+        focus.refreshNow()
+
         guard let snapshot = focus.current else {
             reevaluateAvailability()
             return

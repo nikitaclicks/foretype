@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// The composition root. Constructs every long-lived service exactly once and
@@ -27,6 +28,8 @@ final class AppEnvironment: ObservableObject {
     // The orchestrator and the on-demand window surfaces.
     let coordinator: CompletionCoordinator
     let windowManager: WindowManager
+
+    private var cancellables = Set<AnyCancellable>()
 
     init() {
         let permissions = PermissionMonitor()
@@ -82,6 +85,28 @@ final class AppEnvironment: ObservableObject {
         }
 
         coordinator.start()
+
+        // Start the OS-facing input streams. The coordinator holds these behind
+        // capability protocols that do not expose start(), so the composition
+        // root owns their lifecycle. FocusWatcher self-guards on AX trust each
+        // poll (returns nil snapshots until granted); KeyboardTap.start() is a
+        // no-op without Input Monitoring and is (re)installed when the grant
+        // flips below — so granting after launch needs no relaunch.
+        focus.start()
+        if permissions.inputMonitoringGranted {
+            keyboardTap.start()
+        }
+
+        // React to permission changes via the @Published properties (Combine),
+        // not permissions.changes — the coordinator is the single consumer of
+        // that AsyncStream, and a second iterator would split its events.
+        permissions.$inputMonitoringGranted
+            .removeDuplicates()
+            .sink { [weak self] granted in
+                guard let self else { return }
+                if granted { self.keyboardTap.start() } else { self.keyboardTap.stop() }
+            }
+            .store(in: &cancellables)
 
         if !hasCompletedFirstRun {
             windowManager.showOnboarding()

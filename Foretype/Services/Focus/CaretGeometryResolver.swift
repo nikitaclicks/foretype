@@ -21,12 +21,16 @@ enum CaretGeometryResolver {
             return CaretGeometry(rect: normalizedCaretRect(cocoa), quality: .exact, observedCharWidth: nil)
         }
 
-        // Step 2: web text-marker bounds. AXBoundsForTextMarkerRange has no
-        // public typed bridge here; we treat the standard NSRange path above as
-        // the primary, and rely on character-before (step 3) for web hosts that
-        // accept NSRange-style bounds. Left explicit so the ladder is complete.
-        // (No additional code: hosts exposing only text-marker bounds without an
-        //  NSRange equivalent fall through to step 3/4 or become unsupported.)
+        // Step 2: web text-marker bounds → derived. Chromium/WebKit hosts (Chrome,
+        // and Electron apps, and rich web editors like ClickUp) frequently return
+        // empty / zero-height rects for the NSRange `AXBoundsForRange` above, but
+        // expose the caret reliably through `AXSelectedTextMarkerRange` +
+        // `AXBoundsForTextMarkerRange`. This is the spec's step 2 (doc 03).
+        if let axRect = AccessibilityBridge.boundsForSelectedTextMarkerRange(of: element),
+           isUsableCaretRect(axRect),
+           let cocoa = AccessibilityBridge.axRectToCocoa(axRect) {
+            return CaretGeometry(rect: normalizedCaretRect(cocoa), quality: .derived, observedCharWidth: nil)
+        }
 
         // Step 3: character-before, shifted to its trailing edge → derived.
         if caret > 0,
@@ -48,7 +52,11 @@ enum CaretGeometryResolver {
             }
         }
 
-        // Step 4: proportional within child static-text runs → derived.
+        // Step 4: proportional within DESCENDANT static-text runs → derived. Web
+        // rich editors (ClickUp/ProseMirror, etc.) return degenerate rects for
+        // both NSRange and collapsed text-marker bounds, but DO expose real frames
+        // on the rendered AXStaticText runs (often nested several groups deep). We
+        // locate the run containing the caret offset and interpolate within it.
         if let derived = proportionalWithinRuns(element: element, caret: caret) {
             return derived
         }
@@ -74,47 +82,57 @@ enum CaretGeometryResolver {
 
     // MARK: - Step 4 helper
 
-    /// Walk AXStaticText children, find the run containing the caret offset, and
-    /// estimate the caret x proportionally within that run. Yields an observed
-    /// character width. Quality `.derived`.
+    /// Depth-first over DESCENDANT `AXStaticText` runs in document order, find the
+    /// run containing the caret offset, and interpolate the caret x proportionally
+    /// within that run's real frame. Quality `.derived`. Bounded by a node budget
+    /// and a depth cap so a huge document can't stall a poll (we "get out of the
+    /// way" — return nil → estimated — rather than walk an unbounded tree).
     private static func proportionalWithinRuns(element: AXUIElement, caret: Int) -> CaretGeometry? {
-        let children = AccessibilityBridge.elements(element, kAXChildrenAttribute)
-        guard !children.isEmpty else { return nil }
-
         var consumed = 0
-        for child in children {
-            guard let role = AccessibilityBridge.string(child, kAXRoleAttribute),
-                  role == (kAXStaticTextRole as String) else { continue }
-            let runText = AccessibilityBridge.string(child, kAXValueAttribute) ?? ""
-            let runLength = runText.utf16.count
-            guard runLength > 0 else { continue }
+        var budget = 1500
+        var result: CaretGeometry?
 
-            // Is the caret inside this run?
-            if caret >= consumed, caret <= consumed + runLength {
-                guard let runAXRect = AccessibilityBridge.frame(child), isUsableCaretRect(runAXRect) else {
+        func walk(_ node: AXUIElement, _ depth: Int) {
+            guard result == nil, depth <= 10, budget > 0 else { return }
+            for child in AccessibilityBridge.elements(node, kAXChildrenAttribute) {
+                if result != nil || budget <= 0 { return }
+                budget -= 1
+                let role = AccessibilityBridge.string(child, kAXRoleAttribute)
+                if role == (kAXStaticTextRole as String) {
+                    let runText = AccessibilityBridge.string(child, kAXValueAttribute) ?? ""
+                    let runLength = runText.utf16.count
+                    guard runLength > 0 else { continue }
+                    // Caret falls within (or at the trailing edge of) this run.
+                    if caret >= consumed, caret <= consumed + runLength,
+                       let runRect = AccessibilityBridge.frame(child), isUsableCaretRect(runRect) {
+                        let offsetInRun = caret - consumed
+                        let fraction = CGFloat(offsetInRun) / CGFloat(runLength)
+                        let charWidth = runRect.width / CGFloat(runLength)
+                        let caretAXRect = CGRect(
+                            x: runRect.origin.x + runRect.width * fraction,
+                            y: runRect.origin.y,
+                            width: 1,
+                            height: runRect.height
+                        )
+                        if let cocoa = AccessibilityBridge.axRectToCocoa(caretAXRect) {
+                            result = CaretGeometry(
+                                rect: normalizedCaretRect(cocoa),
+                                quality: .derived,
+                                observedCharWidth: charWidth > 0 ? charWidth : nil
+                            )
+                            return
+                        }
+                    }
                     consumed += runLength
-                    continue
-                }
-                let offsetInRun = caret - consumed
-                let fraction = runLength > 0 ? CGFloat(offsetInRun) / CGFloat(runLength) : 0
-                let charWidth = runLength > 0 ? runAXRect.width / CGFloat(runLength) : nil
-                let caretAXRect = CGRect(
-                    x: runAXRect.origin.x + runAXRect.width * fraction,
-                    y: runAXRect.origin.y,
-                    width: 1,
-                    height: runAXRect.height
-                )
-                if let cocoa = AccessibilityBridge.axRectToCocoa(caretAXRect) {
-                    return CaretGeometry(
-                        rect: normalizedCaretRect(cocoa),
-                        quality: .derived,
-                        observedCharWidth: charWidth
-                    )
+                    // Leaf text — do not descend into it.
+                } else {
+                    walk(child, depth + 1)
                 }
             }
-            consumed += runLength
         }
-        return nil
+
+        walk(element, 0)
+        return result
     }
 
     // MARK: - Validation

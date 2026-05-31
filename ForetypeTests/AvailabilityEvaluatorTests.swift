@@ -14,6 +14,7 @@ struct AvailabilityEvaluatorTests {
             quality: .derived,
             observedCharWidth: 7
         ),
+        fieldRect: CGRect? = CGRect(x: 0, y: 0, width: 300, height: 24),
         isSecure: Bool = false,
         capability: FocusCapability = .supported
     ) -> FocusSnapshot {
@@ -26,6 +27,7 @@ struct AvailabilityEvaluatorTests {
             trailingText: "",
             selection: NSRange(location: 11, length: 0),
             caret: caret,
+            fieldRect: fieldRect,
             isSecure: isSecure,
             capability: capability
         )

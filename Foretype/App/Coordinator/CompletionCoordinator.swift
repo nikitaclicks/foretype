@@ -51,6 +51,14 @@ final class CompletionCoordinator: ObservableObject {
     /// so the freshness re-read can compare identity + preceding text on return.
     var pendingSnapshot: FocusSnapshot?
 
+    /// Identity of the field the last focus snapshot referred to. Lets
+    /// `handleFocusSnapshot` tell a *real* focus change (new field → reset) apart
+    /// from the same field merely updating (text typed, caret moved, window
+    /// dragged) — the latter must NOT tear down pending generation work. This is
+    /// tracked separately from `pendingSnapshot`/`session` because both are nil
+    /// during the first keystrokes, before any cycle has completed.
+    var lastFocusIdentity: FocusIdentity?
+
     /// Background tasks consuming the dependency streams; cancelled on `stop()`.
     var streamTasks: [Task<Void, Never>] = []
 

@@ -91,12 +91,8 @@ actor OpenAIEngine: CompletionEngine {
     // MARK: Request construction
 
     private func makeURLRequest(for request: CompletionRequest) throws -> URLRequest {
-        let trimmedBase = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Drop a trailing slash so we don't produce "//v1/...".
-        let normalizedBase = trimmedBase.hasSuffix("/") ? String(trimmedBase.dropLast()) : trimmedBase
-
-        guard !normalizedBase.isEmpty,
-              let url = URL(string: normalizedBase + "/v1/chat/completions") else {
+        guard let urlString = Self.chatCompletionsURLString(base: baseURL),
+              let url = URL(string: urlString) else {
             throw CompletionEngineError.unavailable(reason: "Invalid base URL.")
         }
 
@@ -118,6 +114,25 @@ actor OpenAIEngine: CompletionEngine {
         }
 
         return urlRequest
+    }
+
+    /// Pure helper: resolve the chat-completions endpoint from a user-supplied
+    /// base URL, tolerating the common variations people actually enter:
+    ///   "http://host:8000"               → http://host:8000/v1/chat/completions
+    ///   "http://host:8000/"              → http://host:8000/v1/chat/completions
+    ///   "http://host:8000/v1"            → http://host:8000/v1/chat/completions
+    ///   "http://host:8000/v1/"           → http://host:8000/v1/chat/completions
+    ///   "http://host:8000/v1/chat/completions" → unchanged
+    /// Avoids the doubled "/v1/v1/..." that yields a 404. Returns nil if empty.
+    static func chatCompletionsURLString(base: String) -> String? {
+        var s = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        while s.hasSuffix("/") { s.removeLast() }
+        guard !s.isEmpty else { return nil }
+
+        if s.hasSuffix("/chat/completions") { return s }
+        if s.hasSuffix("/v1") { return s + "/chat/completions" }
+        return s + "/v1/chat/completions"
     }
 
     /// Pure helper: build the chat-completions JSON body. Factored out so the

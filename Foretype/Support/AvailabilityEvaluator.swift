@@ -62,7 +62,8 @@ enum AvailabilityEvaluator {
             return .disabled(.fieldUnsupported)
         }
 
-        // 8. We need a caret with at least `derived` quality to place ghost text.
+        // 8. We anchor ghost text to the caret, so we need a caret rect of at
+        //    least `derived` quality to place it.
         guard let caret = snapshot.caret, caret.quality != .estimated else {
             return .disabled(.fieldUnsupported)
         }

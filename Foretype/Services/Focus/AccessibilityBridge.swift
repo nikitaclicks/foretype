@@ -26,6 +26,30 @@ enum AccessibilityBridge {
         return (app.bundleIdentifier, app.processIdentifier, app.localizedName)
     }
 
+    // MARK: - Enhanced accessibility opt-in (Chromium / Electron)
+
+    /// Ask an application to expose its full accessibility tree by setting
+    /// `AXManualAccessibility` on its application-level element.
+    ///
+    /// Chromium-based apps (Chrome, Edge, Brave, Arc, …) and Electron apps (Slack,
+    /// VS Code, Discord, …) build their inner / web AX tree only when an assistive
+    /// client opts in this way; until then their editable web fields are invisible
+    /// to AX and resolve to nothing — which is why completion appears to "not work"
+    /// in Chrome while working in native apps. Native apps don't recognize the
+    /// attribute and ignore the set, so this is safe to call for any app.
+    /// Best-effort: the return status is intentionally ignored, and the tree mounts
+    /// a beat later, so the poll loop picks up the now-resolvable field on a
+    /// subsequent tick (doc 03, "App-specific quirks").
+    ///
+    /// We deliberately set ONLY `AXManualAccessibility`, never
+    /// `AXEnhancedUserInterface`: the latter can provoke window move/resize side
+    /// effects in native AppKit apps, and we apply this to every frontmost app.
+    static func enableEnhancedAccessibility(pid: pid_t) {
+        guard pid > 0 else { return }
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    }
+
     // MARK: - Tolerant attribute reads
 
     /// Raw attribute copy. Returns nil for any non-success status.
@@ -128,6 +152,50 @@ enum AccessibilityBridge {
         var rect = CGRect.zero
         guard AXValueGetValue(axValue, .cgRect, &rect) else { return nil }
         // AX sometimes returns zero/empty rects for collapsed/offscreen ranges.
+        guard rect.width.isFinite, rect.height.isFinite,
+              rect.origin.x.isFinite, rect.origin.y.isFinite else { return nil }
+        return rect
+    }
+
+    // MARK: - Parameterized attribute: bounds via text markers (web hosts)
+
+    /// Caret/selection bounds via the **text-marker** API, for web hosts
+    /// (Chromium / WebKit) that don't map NSRange offsets to geometry through
+    /// `AXBoundsForRange` (they return empty / zero-height rects). Reads the live
+    /// `AXSelectedTextMarkerRange` — opaque; passed straight back through without
+    /// inspecting it — and asks for its bounds via `AXBoundsForTextMarkerRange`.
+    /// Walks up to an ancestor (the web area) because the selection marker range
+    /// is often exposed there rather than on the field itself. Returns AX
+    /// (top-left) coords, or nil if the host has no text markers / no usable rect.
+    static func boundsForSelectedTextMarkerRange(of start: AXUIElement) -> CGRect? {
+        var node: AXUIElement? = start
+        var hops = 0
+        while let current = node, hops < 5 {
+            if let markerRange = copyAttribute(current, "AXSelectedTextMarkerRange"),
+               let rect = boundsForTextMarkerRange(current, markerRange) {
+                return rect
+            }
+            node = element(current, kAXParentAttribute)
+            hops += 1
+        }
+        return nil
+    }
+
+    /// Ask `element` for the bounds of an opaque `AXTextMarkerRange`.
+    private static func boundsForTextMarkerRange(_ element: AXUIElement, _ markerRange: CFTypeRef) -> CGRect? {
+        var result: CFTypeRef?
+        let err = AXUIElementCopyParameterizedAttributeValue(
+            element,
+            "AXBoundsForTextMarkerRange" as CFString,
+            markerRange,
+            &result
+        )
+        guard err == .success, let raw = result else { return nil }
+        guard CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+        let axValue = raw as! AXValue
+        guard AXValueGetType(axValue) == .cgRect else { return nil }
+        var rect = CGRect.zero
+        guard AXValueGetValue(axValue, .cgRect, &rect) else { return nil }
         guard rect.width.isFinite, rect.height.isFinite,
               rect.origin.x.isFinite, rect.origin.y.isFinite else { return nil }
         return rect

@@ -54,13 +54,15 @@ extension CompletionCoordinator {
             return true
         }
 
-        // Keep previewing the shortened remainder, repositioning to the predicted
-        // new caret (doc 08): advance x by the inserted characters' width.
+        // Show the shortened remainder at the predicted new caret (doc 08): the
+        // consumed chunk must disappear from the bubble, so re-show the new text
+        // (reposition would keep the old text). Predict the caret x by the
+        // inserted width so it doesn't jump while the next poll confirms.
         session = advanced
         setState(.previewing(advanced))
 
         if let geometry = predictedGeometry(after: chunk, from: live) {
-            overlay.reposition(geometry: geometry)
+            overlay.show(advanced.remainder, geometry: geometry)
         }
 
         // Confirm the real caret with an early focus refresh.

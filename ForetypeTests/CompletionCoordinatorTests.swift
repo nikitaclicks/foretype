@@ -135,10 +135,10 @@ struct CompletionCoordinatorTests {
         #expect(h.overlay.showCount == 1)
     }
 
-    // MARK: 4. Accept inserts nextChunk and advances / repositions
+    // MARK: 4. Accept inserts nextChunk and updates the bubble to the remainder
 
     @Test
-    func acceptInsertsNextChunkAndRepositions() async {
+    func acceptInsertsNextChunkAndShowsRemainder() async {
         let engine = FakeEngine(response: .text("world wide web"))
         let h = makeHarness(engine: engine)
         h.focus.emit(SnapshotFactory.supported(precedingText: "hello "))
@@ -151,12 +151,15 @@ struct CompletionCoordinatorTests {
         // Previewing the full completion.
         #expect(h.overlay.lastShownText == "world wide web")
 
-        // Accept: inserts the first chunk ("world ") and repositions.
+        // Accept: inserts the first chunk ("world ") and re-shows the shortened
+        // remainder (the field anchor doesn't move, so we `show`, not reposition).
+        let refreshesBeforeAccept = h.focus.refreshCount
         let consumed = h.input.send(.accept)
         #expect(consumed == true)
         #expect(h.inserter.inserted == ["world "])
-        #expect(h.overlay.repositionCount == 1)
-        #expect(h.focus.refreshCount == 1)
+        #expect(h.overlay.lastShownText == "wide web")
+        // Accept confirms the post-insertion caret with exactly one extra refresh.
+        #expect(h.focus.refreshCount == refreshesBeforeAccept + 1)
 
         if case .previewing(let session) = h.coordinator.state {
             #expect(session.remainder == "wide web")
@@ -254,6 +257,63 @@ struct CompletionCoordinatorTests {
 
         #expect(h.coordinator.state == .disabled(reason: .backendUnavailable))
         #expect(h.coordinator.backendAvailable == false)
+    }
+
+    // MARK: 10. A same-field focus snapshot must NOT cancel a pending generation
+    //
+    // Regression for "suggestions only appear after re-focusing the field": a
+    // keystroke emits BOTH an InputEvent (schedules the debounce) AND, a poll
+    // interval later, a FocusWatcher snapshot reflecting the new text — for the
+    // SAME field (identity unchanged). That snapshot must leave the debounce
+    // intact, otherwise typing never produces a suggestion until re-focus.
+    @Test
+    func sameFieldSnapshotDoesNotCancelPendingGeneration() async {
+        let h = makeHarness(debounceMs: 40)
+        h.focus.emit(SnapshotFactory.supported(changeSequence: 1, precedingText: "hello "))
+        await tick()
+
+        // Keystroke schedules the debounce.
+        h.input.send(.textMutation)
+        #expect(h.coordinator.state == .debouncing)
+
+        // The watcher observes the typed text shortly after, as a SAME-field
+        // snapshot (identity unchanged), before the debounce window elapses.
+        await sleepMs(15)
+        h.focus.emit(SnapshotFactory.supported(changeSequence: 1, precedingText: "hello w"))
+        await tick()
+
+        // Still debouncing — the snapshot must not have torn the cycle down.
+        #expect(h.coordinator.state == .debouncing)
+
+        // The debounce fires and a suggestion is produced without any re-focus.
+        await sleepMs(60)
+        await tick()
+        #expect(h.engine.generateCount == 1)
+        #expect(h.overlay.showCount == 1)
+        #expect(h.coordinator.state.isPreviewingState)
+    }
+
+    // MARK: 11. A different-field focus snapshot DOES reset the pipeline
+
+    @Test
+    func differentFieldSnapshotResetsPipeline() async {
+        let h = makeHarness(debounceMs: 40)
+        h.focus.emit(SnapshotFactory.supported(changeSequence: 1, precedingText: "hello "))
+        await tick()
+
+        h.input.send(.textMutation)
+        #expect(h.coordinator.state == .debouncing)
+
+        // Focus jumps to a different field (new identity) before the debounce.
+        await sleepMs(10)
+        h.focus.emit(SnapshotFactory.supported(changeSequence: 2, precedingText: "other "))
+        await tick()
+
+        // The pending cycle is abandoned: no generation fires for the old field.
+        await sleepMs(60)
+        await tick()
+        #expect(h.engine.generateCount == 0)
+        #expect(h.overlay.showCount == 0)
     }
 }
 

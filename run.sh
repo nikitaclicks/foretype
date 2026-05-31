@@ -11,6 +11,33 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# --- Preflight ---------------------------------------------------------------
+# Foretype is a developer build with no prebuilt/signed download yet
+# (distribution + notarization are out of scope for now), so building it
+# requires full Xcode — not just the Command Line Tools. Fail with guidance
+# instead of a cryptic xcodebuild error.
+if ! xcodebuild -version >/dev/null 2>&1; then
+  echo "✗ Foretype needs Xcode to build, and it isn't available."
+  if xcode-select -p 2>/dev/null | grep -q CommandLineTools; then
+    echo "  You have the Command Line Tools, but not full Xcode."
+    echo "    1. Install Xcode from the App Store (free)."
+    echo "    2. Point the toolchain at it:"
+    echo "         sudo xcode-select -s /Applications/Xcode.app"
+    echo "    3. Re-run ./run.sh"
+  else
+    echo "  Install Xcode from the App Store (free), then re-run ./run.sh"
+  fi
+  echo
+  echo "  (There is no signed, double-clickable download yet — this script"
+  echo "   builds Foretype from source on your machine.)"
+  exit 1
+fi
+
+if [ ! -d "Foretype.xcodeproj" ]; then
+  echo "✗ Run this from the Foretype repo root (Foretype.xcodeproj not found here)."
+  exit 1
+fi
+
 DERIVED="$PWD/build"                                   # visible (no leading dot)
 APP="$DERIVED/Build/Products/Debug/Foretype.app"
 LINK="$PWD/Foretype.app"                               # convenience symlink at repo root
