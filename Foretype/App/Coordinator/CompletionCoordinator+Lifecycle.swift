@@ -50,6 +50,7 @@ extension CompletionCoordinator {
         for task in streamTasks { task.cancel() }
         streamTasks = []
         input.onEvent = nil
+        surroundingContextCache = nil
         endSession(hideReason: "stopped")
     }
 

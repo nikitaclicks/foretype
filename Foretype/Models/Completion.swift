@@ -28,6 +28,11 @@ struct CompletionRequest: Equatable, Sendable {
     let trailingText: String
     let appName: String
     let fieldRole: String
+    /// Bounded, read-only background content read from the accessibility tree
+    /// *around* the focused field (e.g. a ClickUp task title, description, or
+    /// earlier comments). Empty when none is available or the field is not a
+    /// multi-line composer. Never the continuation target (doc 06).
+    let surroundingContext: String
 
     // Shape of the desired output
     let lengthHint: LengthHint

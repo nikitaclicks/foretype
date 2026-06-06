@@ -1,4 +1,5 @@
 import Foundation
+import ApplicationServices
 
 /// Generation: debounce → mint token → build request → call engine off-main →
 /// freshness check → normalize → present or drop (doc 05, "+Generation").
@@ -51,10 +52,15 @@ extension CompletionCoordinator {
         let token = generation
         pendingSnapshot = snapshot
 
+        // Gather read-only surrounding AX content (cached per focus identity) so
+        // the completion can be relevant to what's in the app, not just the field.
+        let surrounding = surroundingContext(for: snapshot)
+
         let request = PromptBuilder.build(
             snapshot: snapshot,
             settings: settings.current,
-            generation: token
+            generation: token,
+            surroundingContext: surrounding
         )
 
         setState(.generating)
@@ -124,5 +130,47 @@ extension CompletionCoordinator {
             endSession(hideReason: "generation failed")
             setState(.failed(reason: reason))
         }
+    }
+
+    /// Lazily gather (and cache, per focus identity) the read-only surrounding AX
+    /// content for a snapshot (doc 06). Cheap on a cache hit; on a miss it
+    /// re-queries the live focused element and walks a bounded slice of the AX
+    /// tree via `SurroundingContextResolver`. Returns "" for fields that
+    /// shouldn't pull panel context (non-composer, secure, or unsupported), which
+    /// makes the assembled prompt byte-identical to the no-context case.
+    func surroundingContext(for snapshot: FocusSnapshot) -> String {
+        // Only multi-line composer fields benefit; a single-line search/title box
+        // would just pull in unrelated panel noise.
+        guard snapshot.capability == .supported,
+              !snapshot.isSecure,
+              snapshot.role == (kAXTextAreaRole as String) else {
+            return ""
+        }
+
+        // Cache hit: same field, still fresh.
+        if let entry = surroundingContextCache,
+           entry.identity == snapshot.identity,
+           surroundingClock.now - entry.capturedAt <= surroundingContextTTL {
+            return entry.context
+        }
+
+        // Miss: re-query the live focused element (FocusSnapshot deliberately does
+        // not retain the AXUIElement) and walk the tree once.
+        guard let focused = AccessibilityBridge.systemFocusedElement(),
+              let resolution = FocusResolver.resolve(focused: focused),
+              !resolution.isSecure else {
+            return ""
+        }
+
+        let gathered = SurroundingContextResolver.gather(focusedEditable: resolution.element)
+        // Belt-and-suspenders: drop any fragment that is the in-progress text.
+        let cleaned = SurroundingContextWindowing.removingOverlap(gathered, with: snapshot.precedingText)
+
+        surroundingContextCache = SurroundingContextCacheEntry(
+            identity: snapshot.identity,
+            context: cleaned,
+            capturedAt: surroundingClock.now
+        )
+        return cleaned
     }
 }

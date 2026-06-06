@@ -62,6 +62,27 @@ final class CompletionCoordinator: ObservableObject {
     /// Background tasks consuming the dependency streams; cancelled on `stop()`.
     var streamTasks: [Task<Void, Never>] = []
 
+    /// One-entry cache of read-only surrounding AX content (doc 06), keyed by
+    /// focus identity. Focus is singular, so a single slot suffices. Gathered
+    /// lazily at generation time and reused across keystrokes within the same
+    /// field, so the 50 ms focus poll never pays for the tree walk.
+    var surroundingContextCache: SurroundingContextCacheEntry?
+
+    /// Clock for the surrounding-context cache TTL (the coordinator may hold a
+    /// clock; the pure `PromptBuilder` may not).
+    let surroundingClock = ContinuousClock()
+
+    /// How long a gathered surrounding-context string stays valid for a stable
+    /// focus identity before it is re-gathered (catches new comments / scrolling
+    /// without re-walking the tree on every generation).
+    let surroundingContextTTL: Duration = .seconds(5)
+
+    struct SurroundingContextCacheEntry {
+        let identity: FocusIdentity
+        let context: String
+        let capturedAt: ContinuousClock.Instant
+    }
+
     init(
         focus: FocusProviding,
         input: InputObserving,

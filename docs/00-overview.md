@@ -47,9 +47,10 @@ them.
   no GGUF/weights management. On-device generation is provided solely by Apple
   Intelligence; everything else goes over HTTP.
 - **No screenshot / OCR / visual context.** Foretype does not capture the
-  screen. It reasons only about text it can read from the focused field via
-  Accessibility. Consequently it does **not** request Screen Recording
-  permission.
+  screen. It reasons only about text it can read via Accessibility — the focused
+  field, plus bounded read-only content *surrounding* that field (e.g. a task
+  title, description, or earlier comments; see doc 06). It does **not** request
+  Screen Recording permission, and there is no pixel capture or OCR anywhere.
 - **No multi-line / paragraph generation as a feature surface.** Completions
   are short continuations (a handful of words up to a short phrase), not essay
   drafting.

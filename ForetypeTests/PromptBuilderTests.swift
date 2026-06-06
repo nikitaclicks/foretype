@@ -138,6 +138,77 @@ struct PromptBuilderTests {
         #expect(req.trailingText == "tail")
     }
 
+    // MARK: - Surrounding context
+
+    @Test func noSurroundingSectionWhenEmpty() {
+        // Default (no surrounding context) must produce a prompt with no
+        // background section — guards the byte-identical-when-empty property.
+        let req = PromptBuilder.build(snapshot: snapshot(preceding: "hello"), settings: settings(preset: .medium), generation: 0)
+        #expect(!req.prompt.contains("Background context"))
+        #expect(!req.prompt.contains("Surrounding content:"))
+        #expect(req.surroundingContext == "")
+    }
+
+    @Test func emptySurroundingProducesIdenticalPromptToNoArgument() {
+        let snap = snapshot(preceding: "hello world")
+        let set = settings(preset: .medium)
+        let withoutArg = PromptBuilder.build(snapshot: snap, settings: set, generation: 1)
+        let withEmpty = PromptBuilder.build(snapshot: snap, settings: set, generation: 1, surroundingContext: "")
+        #expect(withoutArg.prompt == withEmpty.prompt)
+        #expect(withoutArg == withEmpty)
+    }
+
+    @Test func surroundingSectionPresentWhenProvided() {
+        let req = PromptBuilder.build(
+            snapshot: snapshot(preceding: "Let's"),
+            settings: settings(preset: .medium),
+            generation: 0,
+            surroundingContext: "Task: Ship the login fix\nDescription: Users can't sign in"
+        )
+        #expect(req.prompt.contains("Background context"))
+        #expect(req.prompt.contains("Do NOT continue"))
+        #expect(req.prompt.contains("Surrounding content:"))
+        #expect(req.prompt.contains("Ship the login fix"))
+    }
+
+    @Test func surroundingSectionAppearsBeforeCaretContext() {
+        let req = PromptBuilder.build(
+            snapshot: snapshot(preceding: "PRECEDING_MARKER"),
+            settings: settings(preset: .medium),
+            generation: 0,
+            surroundingContext: "SURROUNDING_MARKER"
+        )
+        let surroundingRange = req.prompt.range(of: "Surrounding content:")
+        let beforeRange = req.prompt.range(of: "Text before caret:")
+        #expect(surroundingRange != nil)
+        #expect(beforeRange != nil)
+        if let s = surroundingRange, let b = beforeRange {
+            #expect(s.lowerBound < b.lowerBound)
+        }
+    }
+
+    @Test func surroundingContextIsWindowedAndCarriedThrough() {
+        let oversized = String(repeating: "q", count: SurroundingContextWindowing.totalCharBudget + 1000)
+        let req = PromptBuilder.build(
+            snapshot: snapshot(preceding: "x"),
+            settings: settings(preset: .medium),
+            generation: 0,
+            surroundingContext: oversized
+        )
+        #expect(req.surroundingContext == SurroundingContextWindowing.windowed(oversized))
+        #expect(req.surroundingContext.count <= SurroundingContextWindowing.totalCharBudget)
+        #expect(req.prompt.contains(req.surroundingContext))
+    }
+
+    @Test func surroundingContextIsDeterministic() {
+        let snap = snapshot(preceding: "The quick brown fox")
+        let set = settings(preset: .medium)
+        let a = PromptBuilder.build(snapshot: snap, settings: set, generation: 3, surroundingContext: "Background A\nBackground B")
+        let b = PromptBuilder.build(snapshot: snap, settings: set, generation: 3, surroundingContext: "Background A\nBackground B")
+        #expect(a == b)
+        #expect(a.prompt == b.prompt)
+    }
+
     // MARK: - Field role
 
     @Test func fieldRoleCombinesRoleAndSubrole() {

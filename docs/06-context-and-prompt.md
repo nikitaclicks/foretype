@@ -1,8 +1,11 @@
 # 06 — Context and Prompt Construction
 
-Foretype completes text using only what it can read from the focused field plus
-a little ambient metadata. There is no clipboard scraping, no screen capture,
-and no user-profile personalization (all explicitly out of scope, doc 00).
+Foretype completes text using what it can read from the focused field, bounded
+read-only content *surrounding* that field (read from the accessibility tree —
+e.g. a ClickUp task title, description, or earlier comments), and a little
+ambient metadata. There is no clipboard scraping, **no screen capture, and no
+OCR** (it is all Accessibility-only), and no user-profile personalization (all
+explicitly out of scope, doc 00).
 
 ## What goes into a request
 
@@ -15,6 +18,7 @@ struct CompletionRequest: Equatable, Sendable {
     let trailingText: String        // bounded text after the caret (may be empty)
     let appName: String             // e.g. "Safari", "Notes" — light situational hint
     let fieldRole: String           // AX role/subrole, coarse hint (e.g. text area vs. one-line field)
+    let surroundingContext: String  // bounded read-only background around the field (may be empty)
 
     // Shape of the desired output
     let lengthHint: LengthHint      // see word-count presets
@@ -36,6 +40,43 @@ struct CompletionRequest: Equatable, Sendable {
 - `trailingText` is kept short (a small window) and is optional; it helps the
   model avoid duplicating what already follows the caret. Some hosts won't
   provide it — that's fine.
+
+### Surrounding context
+
+`surroundingContext` is bounded **read-only background** read from the
+accessibility tree *around* the focused field — for example earlier messages in
+a ClickUp chat thread, or a task's title, description, and comments. It is what
+makes a completion relevant to *what is in the app*, not just the field, while
+staying Accessibility-only (no screen capture, no OCR).
+
+Unlike `precedingText`/`trailingText`, gathering it is **not pure** — it walks a
+bounded slice of the AX tree — so it does not live in `PromptBuilder`. The walk
+is done by a `@MainActor` resolver (`SurroundingContextResolver`) and the result
+is passed *into* the builder, which only windows it. Key properties:
+
+- **Lazy + cached.** Gathered only at generation time, and cached by the
+  coordinator keyed by `FocusIdentity` with a ~5 s TTL, so it is collected about
+  once per focused field — never on the 50 ms focus poll, and reused across
+  keystrokes within the same field.
+- **Scoped, not the whole page.** The resolver climbs to the visually-dominant
+  content region (chat thread, task panel, document) by frame-area fraction,
+  stopping at the web area, so sidebars / nav / browser chrome are excluded.
+  Web composers nest deep, so the climb cap is generous (~20 hops) — a shallow
+  cap stops at a sparse sub-wrapper that misses the surrounding messages.
+- **Bounded.** Capped by node-visit count (~800), per-fragment chars (~240),
+  fragment count (~200), and a total budget (~3000 chars), de-duplicated, in
+  document order, by a pure helper (`SurroundingContextWindowing`).
+- **Composer-only.** Gathered only for multi-line composer fields (AX text
+  areas); single-line search/title boxes get `""` so they don't pull panel noise.
+- **Never the focused field's own text.** The focused subtree is pruned during
+  the walk, and any fragment overlapping the in-progress `precedingText` is
+  removed — so background never duplicates what the user is typing.
+- **Never secure.** Secure fields are skipped at the gate and at every node.
+
+In the prompt it is framed as read-only background that the model must **not**
+continue, quote, summarize, or repeat, and is placed *before* the caret context
+so the text to continue stays last. When empty (the common case for native apps
+or non-composer fields) the assembled prompt is byte-identical to before.
 
 ### Length hint
 
@@ -78,6 +119,10 @@ continuation, not chat. The framing should make clear to the model that it must:
 - Respect the length hint.
 - Stop at a natural boundary.
 
+When `surroundingContext` is non-empty, an additional **read-only background**
+section precedes the caret context (and is omitted entirely when empty, keeping
+the prompt byte-identical to the no-context case).
+
 A minimal shape (illustrative, not literal):
 
 ```
@@ -85,6 +130,11 @@ You are an inline autocomplete engine. Continue the user's text naturally.
 Return ONLY the continuation text, no quotes or commentary.
 Target length: {length instruction}.
 Application: {appName}.
+
+[optional, only when present:]
+Background context (read-only) ... Do NOT continue, quote, or repeat it.
+Surrounding content:
+{surroundingContext}
 
 Text before caret:
 {precedingText}
@@ -114,4 +164,6 @@ on assembling a good request. Keep the gate in `AvailabilityEvaluator`.
   an identical prompt (makes it testable and cache-friendly).
 - Never include text from a secure field (the snapshot never carries it anyway).
 - Context is always windowed to the tail; never send unbounded text.
-- No clipboard, no screen text, no personal identifiers in the prompt.
+- Surrounding context is read-only background, never the continuation target, and
+  excludes the focused field's own subtree.
+- No clipboard, no screen capture, no OCR, no personal identifiers in the prompt.

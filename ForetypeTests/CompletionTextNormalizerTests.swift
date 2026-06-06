@@ -19,6 +19,7 @@ struct CompletionTextNormalizerTests {
             trailingText: "",
             appName: "TestApp",
             fieldRole: "AXTextField",
+            surroundingContext: "",
             lengthHint: hint,
             sampling: SamplingParameters(temperature: 0.2, maxTokens: 48, topP: 0.95),
             prompt: ""

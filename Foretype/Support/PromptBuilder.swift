@@ -10,14 +10,24 @@ enum PromptBuilder {
     ///
     /// - Windows `precedingText` to its tail and `trailingText` to a short head
     ///   via `ContextWindowing`.
+    /// - Windows `surroundingContext` to its budget via
+    ///   `SurroundingContextWindowing`. This string is *gathered* by the
+    ///   coordinator (an AX side effect); the builder only receives and windows
+    ///   it so it stays pure (doc 06).
     /// - Maps `settings.lengthPreset.hint` to a natural-language length
     ///   instruction and `SamplingParameters` (temperature 0.2, topP 0.95,
     ///   maxTokens: short 24 / medium 48 / long 80).
     /// - Frames the task as inline continuation, instructing the model to return
     ///   ONLY the continuation.
-    static func build(snapshot: FocusSnapshot, settings: Settings, generation: UInt64) -> CompletionRequest {
+    static func build(
+        snapshot: FocusSnapshot,
+        settings: Settings,
+        generation: UInt64,
+        surroundingContext: String = ""
+    ) -> CompletionRequest {
         let precedingText = ContextWindowing.windowedPreceding(snapshot.precedingText)
         let trailingText = ContextWindowing.windowedTrailing(snapshot.trailingText)
+        let surrounding = SurroundingContextWindowing.windowed(surroundingContext)
 
         let hint = settings.lengthPreset.hint
         let sampling = SamplingParameters(
@@ -32,6 +42,7 @@ enum PromptBuilder {
         let prompt = assemblePrompt(
             precedingText: precedingText,
             trailingText: trailingText,
+            surroundingContext: surrounding,
             appName: appName,
             lengthInstruction: lengthInstruction(for: hint)
         )
@@ -42,6 +53,7 @@ enum PromptBuilder {
             trailingText: trailingText,
             appName: appName,
             fieldRole: fieldRole,
+            surroundingContext: surrounding,
             lengthHint: hint,
             sampling: sampling,
             prompt: prompt
@@ -81,9 +93,14 @@ enum PromptBuilder {
     // MARK: - Prompt assembly
 
     /// Single canonical prompt string framing inline continuation, not chat.
+    /// The optional surrounding-context section is emitted ONLY when non-empty,
+    /// so native / no-context cases produce a byte-identical prompt to before.
+    /// It is placed before the caret context so the live text the model must
+    /// continue stays physically last (the continuation target).
     private static func assemblePrompt(
         precedingText: String,
         trailingText: String,
+        surroundingContext: String,
         appName: String,
         lengthInstruction: String
     ) -> String {
@@ -94,6 +111,17 @@ enum PromptBuilder {
         lines.append("Target length: \(lengthInstruction). Stop at a natural boundary.")
         lines.append("Application: \(appName).")
         lines.append("")
+        if !surroundingContext.isEmpty {
+            lines.append("Background context (read-only). The following is other content visible around the")
+            lines.append("field the user is typing in — for example earlier messages in the conversation, a")
+            lines.append("document, or a task's title and description. Use it only to understand the topic")
+            lines.append("and intent. Do NOT continue it, quote it, summarize it, or repeat any of it.")
+            lines.append("Continue ONLY the user's text at the caret below.")
+            lines.append("")
+            lines.append("Surrounding content:")
+            lines.append(surroundingContext)
+            lines.append("")
+        }
         lines.append("Text before caret:")
         lines.append(precedingText)
         lines.append("")

@@ -56,8 +56,10 @@ extension CompletionCoordinator {
         lastFocusIdentity = snapshot.identity
 
         // Genuine change of focused field (or the very first focus): abandon the
-        // session and any in-flight work, then re-evaluate for the new field.
+        // session and any in-flight work, then re-evaluate for the new field. The
+        // surrounding-context cache is keyed by identity, so invalidate it here.
         guard sameField else {
+            surroundingContextCache = nil
             work.cancelAll()
             endSession(hideReason: "focus changed")
             reevaluateAvailability()
