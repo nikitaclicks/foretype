@@ -148,6 +148,18 @@ gracefully through them rather than assume a clean tree.
   sometimes only through text-marker APIs, and rich editors may mount their
   editable subtree a beat after focus lands — so the first poll may see a
   wrapper and a later poll the real field. The poll loop naturally retries.
+- **Chromium browsers need `AXEnhancedUserInterface`, not just
+  `AXManualAccessibility`.** Under `AXManualAccessibility` alone, recent Chrome
+  serves only a *partial* tree — control roles + field frames, but **degenerate
+  text geometry** (no `AXSelectedTextMarkerRange`, zero-size `AXBoundsForRange`,
+  no static-text runs), so the caret can't reach `derived` and every web field is
+  `unsupported`. Setting `AXEnhancedUserInterface` (gated to browser bundle IDs,
+  in `AccessibilityBridge.enableEnhancedAccessibility`) promotes the browser to
+  full accessibility and restores caret geometry. Electron apps (e.g. the ClickUp
+  desktop app) expose full geometry under `AXManualAccessibility` already and
+  don't need it. This is sensitive to Chrome updates — if browser autocomplete
+  silently stops (works in other apps / the Electron app, menu shows "ready"),
+  suspect this first.
 - **Out-of-process iframes** (common in web mail/chat) may not expose editable
   nodes through the standard tree at all. Treat as `unsupported` when no usable
   element/geometry is found rather than guessing a wrong caret position.

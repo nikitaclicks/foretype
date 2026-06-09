@@ -91,10 +91,10 @@ final class FocusWatcher: FocusProviding {
 
     /// Opt an app into exposing its full AX tree the first time we see it
     /// frontmost (Chromium/Electron need this; native apps ignore it).
-    private func ensureEnhancedAccessibility(pid: pid_t) {
+    private func ensureEnhancedAccessibility(pid: pid_t, bundleID: String) {
         guard pid > 0, !enhancedAccessibilityPIDs.contains(pid) else { return }
         enhancedAccessibilityPIDs.insert(pid)
-        AccessibilityBridge.enableEnhancedAccessibility(pid: pid)
+        AccessibilityBridge.enableEnhancedAccessibility(pid: pid, bundleID: bundleID)
     }
 
     /// A stable structural signature for `element`, used to recognize the same
@@ -149,7 +149,7 @@ final class FocusWatcher: FocusProviding {
         // this must happen even when no element resolves yet (the tree mounts a
         // beat later and a subsequent poll then sees the real field).
         if let pid = app?.pid {
-            ensureEnhancedAccessibility(pid: pid)
+            ensureEnhancedAccessibility(pid: pid, bundleID: app?.bundleID ?? "")
         }
 
         let bundleID = app?.bundleID ?? ""

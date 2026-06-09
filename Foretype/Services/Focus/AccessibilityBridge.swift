@@ -41,13 +41,38 @@ enum AccessibilityBridge {
     /// a beat later, so the poll loop picks up the now-resolvable field on a
     /// subsequent tick (doc 03, "App-specific quirks").
     ///
-    /// We deliberately set ONLY `AXManualAccessibility`, never
+    /// For NATIVE apps we set ONLY `AXManualAccessibility`, never
     /// `AXEnhancedUserInterface`: the latter can provoke window move/resize side
     /// effects in native AppKit apps, and we apply this to every frontmost app.
-    static func enableEnhancedAccessibility(pid: pid_t) {
+    ///
+    /// For Chromium **browsers** we additionally set `AXEnhancedUserInterface`.
+    /// Under `AXManualAccessibility` alone, recent Chrome exposes only a partial
+    /// tree — control roles + field frames, but degenerate text geometry (no
+    /// `AXSelectedTextMarkerRange`, zero-size `AXBoundsForRange`, no static-text
+    /// runs) — so the caret can't reach `.derived` and the field is unsupported.
+    /// `AXEnhancedUserInterface` promotes the browser to full accessibility incl.
+    /// text geometry. Gated to browsers so native AppKit apps are unaffected.
+    /// (Electron apps like the ClickUp desktop app expose full geometry under
+    /// `AXManualAccessibility` already, so they don't need this.)
+    static func enableEnhancedAccessibility(pid: pid_t, bundleID: String) {
         guard pid > 0 else { return }
         let appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        if isChromiumBrowser(bundleID) {
+            AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        }
+    }
+
+    /// Chromium-based **browsers** (not Electron apps), which need
+    /// `AXEnhancedUserInterface` to expose full text geometry (see above).
+    private static let chromiumBrowserBundleIDs: Set<String> = [
+        "com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.canary", "com.google.Chrome.dev",
+        "com.microsoft.edgemac", "com.brave.Browser", "company.thebrowser.Browser",
+        "com.vivaldi.Vivaldi", "com.operasoftware.Opera",
+    ]
+
+    private static func isChromiumBrowser(_ bundleID: String) -> Bool {
+        chromiumBrowserBundleIDs.contains(bundleID)
     }
 
     // MARK: - Tolerant attribute reads
