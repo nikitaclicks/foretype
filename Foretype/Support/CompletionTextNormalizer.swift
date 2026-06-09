@@ -12,8 +12,8 @@ enum CompletionTextNormalizer {
     /// 1. Remove carriage returns.
     /// 2. Strip wrapping code fences, then leading labels ("Continuation:"), then
     ///    wrapping quotes.
-    /// 3. Strip an echoed prefix of `request.precedingText` the model parroted back.
-    /// 4. If `request.precedingText` ends in a space, drop a single leading space.
+    /// 3. Reconcile against `request.precedingText`: strip an echoed in-progress
+    ///    word and normalize the separator space (see `reconcile`).
     /// 5. Cap to the word ceiling implied by `request.lengthHint`.
     /// 6. Return "" if nothing meaningful remains.
     static func normalize(_ raw: String, request: CompletionRequest) -> String {
@@ -29,13 +29,10 @@ enum CompletionTextNormalizer {
         // 2c. Strip wrapping quotes.
         text = stripWrappingQuotes(text)
 
-        // 3. Strip an echoed prefix of the preceding text.
-        text = stripEchoedPrefix(text, preceding: request.precedingText)
-
-        // 4. If the caret already sits after a space, don't double it.
-        if request.precedingText.hasSuffix(" "), text.hasPrefix(" ") {
-            text.removeFirst()
-        }
+        // 3. Reconcile the model output against the text before the caret:
+        //    strip an echoed in-progress word and own the separator space, so the
+        //    result inserts cleanly at the caret with no duplication or fused words.
+        text = reconcile(text, preceding: request.precedingText)
 
         // 5. Cap to the word ceiling for the requested length.
         text = capToWordCeiling(text, hint: request.lengthHint)
@@ -166,41 +163,87 @@ enum CompletionTextNormalizer {
         return text
     }
 
-    // MARK: - Echo stripping
+    // MARK: - Caret reconciliation
 
-    /// If the model echoed a tail of the preceding text, drop it. We look for the
-    /// longest suffix of `preceding` that the output starts with.
-    private static func stripEchoedPrefix(_ text: String, preceding: String) -> String {
-        guard !preceding.isEmpty, !text.isEmpty else { return text }
+    /// Reconcile raw model output with the text before the caret so it inserts
+    /// cleanly: strip any echoed in-progress word, and own the separator space.
+    ///
+    /// The model is instructed (see `PromptBuilder`) to reproduce the in-progress
+    /// word at the caret before continuing, which lets us anchor spacing instead
+    /// of guessing it. Ordered steps:
+    /// 1. Full echo: if the output begins with the entire preceding text, drop it.
+    /// 2. In-progress word: if the caret sits after a word character, strip the
+    ///    repeated word; if the model instead started a fresh word with no
+    ///    separator, insert one.
+    /// 3. Leading whitespace: drop it entirely when the caret already follows
+    ///    whitespace, else collapse a leading run to a single space.
+    private static func reconcile(_ text: String, preceding: String) -> String {
+        guard !text.isEmpty else { return text }
+        var text = text
 
-        // If the output begins with the full preceding text, strip it outright.
-        if text.hasPrefix(preceding) {
-            return String(text.dropFirst(preceding.count))
-        }
-
-        // Find the longest suffix of `preceding` (broken on whitespace boundaries)
-        // that the text starts with.
-        let chars = Array(preceding)
-        // Candidate boundaries: start of each "word" run inside preceding, plus 0.
-        var boundaries: [Int] = [0]
-        var i = 0
-        while i < chars.count {
-            if chars[i].isWhitespace {
-                var j = i
-                while j < chars.count, chars[j].isWhitespace { j += 1 }
-                if j < chars.count { boundaries.append(j) }
-                i = j
-            } else {
-                i += 1
+        // 1. Full echo of the entire preceding context.
+        if !preceding.isEmpty, text.hasPrefix(preceding) {
+            text = String(text.dropFirst(preceding.count))
+        } else {
+            // 2. In-progress word at the caret (the trailing non-boundary run).
+            let partial = trailingWordRun(preceding)
+            if !partial.isEmpty {
+                if let remainder = dropMatchingPrefix(text, partial: partial) {
+                    // Model repeated the in-progress word — keep only the rest.
+                    text = remainder
+                } else if let first = text.first, !isBoundary(first) {
+                    // Model started a NEW word with no separator — insert one.
+                    text = " " + text
+                }
+                // Otherwise the output already leads with a separator: leave it
+                // for the whitespace normalization below.
             }
         }
-        // Longest (earliest boundary) wins.
-        for b in boundaries {
-            let suffix = String(chars[b...])
-            if !suffix.isEmpty, text.hasPrefix(suffix) {
-                return String(text.dropFirst(suffix.count))
-            }
+
+        // 3. Leading-whitespace normalization.
+        if let last = preceding.last, last.isWhitespace {
+            // The caret already follows whitespace — the separator is in place.
+            text = String(text.drop(while: { $0.isWhitespace }))
+        } else if let first = text.first, first.isWhitespace {
+            // Collapse a leading whitespace run to a single space separator.
+            text = " " + text.drop(while: { $0.isWhitespace })
         }
+
         return text
+    }
+
+    /// The maximal trailing run of non-boundary (word) characters in `text`, i.e.
+    /// the word currently being typed at the caret. Empty when `text` is empty or
+    /// ends at a boundary (whitespace / punctuation / symbol).
+    private static func trailingWordRun(_ text: String) -> String {
+        var result: [Character] = []
+        for character in text.reversed() {
+            if isBoundary(character) { break }
+            result.append(character)
+        }
+        return String(result.reversed())
+    }
+
+    /// If `text` begins with `partial` (compared case-insensitively), drop that
+    /// many characters and return the remainder (original case preserved);
+    /// otherwise `nil`.
+    private static func dropMatchingPrefix(_ text: String, partial: String) -> String? {
+        guard text.count >= partial.count else { return nil }
+        let head = text.prefix(partial.count)
+        guard head.lowercased() == partial.lowercased() else { return nil }
+        return String(text.dropFirst(partial.count))
+    }
+
+    /// A boundary character terminates a word: whitespace, punctuation, or
+    /// symbols. Mirrors `SessionReconciler.isBoundary` so chunking and
+    /// normalization agree on where words begin and end.
+    private static func isBoundary(_ character: Character) -> Bool {
+        for scalar in character.unicodeScalars {
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) { continue }
+            if CharacterSet.punctuationCharacters.contains(scalar) { continue }
+            if CharacterSet.symbols.contains(scalar) { continue }
+            return false
+        }
+        return true
     }
 }

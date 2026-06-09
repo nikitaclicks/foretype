@@ -47,10 +47,13 @@ struct CompletionTextNormalizerTests {
         #expect(out == " was a dragon")
     }
 
-    @Test func leavesTextUntouchedWhenNoEcho() {
+    @Test func insertsSeparatorWhenModelStartsFreshWord() {
+        // Caret sits at the end of a complete word and the model returned a bare
+        // new word with no separator. We must insert the space so it reads
+        // "Hello world today", not "Helloworld today".
         let req = request(preceding: "Hello")
         let out = CompletionTextNormalizer.normalize("world today", request: req)
-        #expect(out == "world today")
+        #expect(out == " world today")
     }
 
     // MARK: - Quote stripping
@@ -122,18 +125,59 @@ struct CompletionTextNormalizerTests {
         #expect(out == "world")
     }
 
-    @Test func keepsLeadingSpaceWhenPrecedingMidWord() {
-        // Caret sits at end of a word (no trailing space) — a leading space is
-        // intentional and must be preserved.
+    @Test func stripsRepeatedInProgressWord() {
+        // Caret is mid-word ("Hel"); the model reproduced the in-progress word
+        // ("Hello") then continued. We strip the repeat so it inserts the rest,
+        // reading "Hello there".
         let req = request(preceding: "Hel")
-        let out = CompletionTextNormalizer.normalize(" lo there", request: req)
-        #expect(out == " lo there")
+        let out = CompletionTextNormalizer.normalize("Hello there", request: req)
+        #expect(out == "lo there")
     }
 
-    @Test func dropsOnlyOneLeadingSpace() {
+    @Test func dropsAllLeadingSpaceWhenPrecedingEndsInSpace() {
+        // The caret already follows a space, so any leading whitespace the model
+        // adds (even multiple) must be dropped — the separator is already there.
         let req = request(preceding: "Hi ")
         let out = CompletionTextNormalizer.normalize("  there", request: req)
-        #expect(out == " there")
+        #expect(out == "there")
+    }
+
+    // MARK: - Word-boundary reconciliation
+
+    @Test func insertsSeparatorAfterCompleteWord() {
+        // The "testingautocomplete" bug: complete word + bare new word → space.
+        let req = request(preceding: "testing")
+        let out = CompletionTextNormalizer.normalize("autocomplete", request: req)
+        #expect(out == " autocomplete")
+    }
+
+    @Test func stripsRepeatedPartialWordNoDoubling() {
+        // The "double a" bug: caret after a partial word "a"; model repeats it and
+        // completes "autocomplete". Strip the echoed "a" so Tab doesn't double it.
+        let req = request(preceding: "testing a")
+        let out = CompletionTextNormalizer.normalize("autocomplete feature", request: req)
+        #expect(out == "utocomplete feature")
+    }
+
+    @Test func insertsSeparatorForArticleThenNewWord() {
+        // Caret after the article "a"; model starts a different new word with no
+        // separator → insert the space ("testing a feature").
+        let req = request(preceding: "testing a")
+        let out = CompletionTextNormalizer.normalize("feature", request: req)
+        #expect(out == " feature")
+    }
+
+    @Test func completesSingleWordFromPartial() {
+        let req = request(preceding: "bro")
+        let out = CompletionTextNormalizer.normalize("brown", request: req)
+        #expect(out == "wn")
+    }
+
+    @Test func stripsRepeatedWordCaseInsensitively() {
+        // Model echoed the in-progress word with different casing; still stripped.
+        let req = request(preceding: "hel")
+        let out = CompletionTextNormalizer.normalize("Hello world", request: req)
+        #expect(out == "lo world")
     }
 
     // MARK: - Length cap

@@ -24,6 +24,19 @@ extension CompletionCoordinator {
             return
         }
 
+        // Suppress while the user is typing a bare slash command (e.g. `/help`):
+        // the focused app shows its own command picker there, so an inline
+        // completion is just noise. Resumes the moment a space follows the command
+        // (the user typed the next word). Re-evaluated on every mutation, so this
+        // simply holds at idle without flagging the feature as disabled.
+        if let snap = focus.current,
+           SlashCommandDetector.isCommandInProgress(precedingText: snap.precedingText) {
+            work.cancelAll()
+            endSession(hideReason: "slash command in progress")
+            setState(.idle)
+            return
+        }
+
         setState(.debouncing)
         let ms = settings.current.clamped().debounceMilliseconds
         work.scheduleDebounce(ms: ms) { [weak self] in
