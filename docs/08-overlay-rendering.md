@@ -37,14 +37,26 @@ struct OverlayGeometry: Equatable, Sendable {
     let caretRect: CGRect      // Cocoa screen coords
     let fieldRect: CGRect?     // editable field bounds, for wrapping
     let quality: CaretQuality
+    let font: CaretFont?       // host field font, when AX exposes it
 }
 ```
 
 - **Position:** left edge at `caretRect.maxX`, vertically aligned to the caret
-  line, so the ghost text reads as the natural continuation of the line.
-- **Font size:** derive from caret height (e.g. `caretRect.height * ~0.78`),
-  clamped to a sane range (≈14–24 pt). With `estimated` caret quality, clamp
-  more tightly (≈14–16 pt) since the height is untrustworthy.
+  line, so the ghost text reads as the natural continuation of the line. The
+  vertical placement is **computed from the rendered font's metrics**, not a
+  constant nudge: the ghost font's glyph box is centered in `caretRect` to find
+  the host baseline, and the hosting view's reported first-baseline offset lands
+  the ghost text's baseline on it (`GhostTextOverlay.baselineAlignedY`). The
+  `ghostVerticalOffset` / `ghostHorizontalOffset` defaults (`UserDefaults`)
+  default to **0** and exist only as optional fine-tune nudges.
+- **Font:** read the host field's real font (family + point size) from
+  Accessibility via `AXAttributedStringForRange`'s `AXFont` attribute
+  (`CaretGeometryResolver` → `CaretGeometry.font` → `OverlayGeometry.font`) and
+  render the ghost text in it, so the preview matches the field exactly. When AX
+  exposes no font (e.g. some Chromium web fields), fall back to deriving the size
+  from caret height (`caretRect.height * ~0.78`, clamped ≈14–24 pt, or ≈14–16 pt
+  for `estimated` quality since the height is untrustworthy) with the system
+  family.
 - **Color:** the configured ghost-text color (doc 10), a low-emphasis tone that
   reads as "preview, not committed." Default to a system secondary/tertiary
   label color.

@@ -27,6 +27,7 @@ final class GhostTextOverlay: OverlayPresenting {
         // Start with an empty placeholder root; real content is pushed on show.
         let initialView = GhostTextView(
             text: "",
+            fontName: nil,
             fontSize: 14,
             color: .secondary,
             wrapWidth: nil
@@ -82,6 +83,7 @@ final class GhostTextOverlay: OverlayPresenting {
         panel.orderOut(nil)
         hostingView.rootView = GhostTextView(
             text: "",
+            fontName: hostingView.rootView.fontName,
             fontSize: hostingView.rootView.fontSize,
             color: hostingView.rootView.color,
             wrapWidth: nil
@@ -95,16 +97,31 @@ final class GhostTextOverlay: OverlayPresenting {
     private func render(text: String, geometry: OverlayGeometry) {
         let color = resolvedColor()
         let caretRect = geometry.caretRect
-        let fontSize = fontSize(for: geometry)
-        let font = NSFont.systemFont(ofSize: fontSize)
 
-        // Vertical/horizontal placement nudges. Defaults are tuned for the common
-        // case; both are overridable without a code change (positive vertical =
-        // up, positive horizontal = right), then relaunch:
-        //   defaults write com.foretype.Foretype ghostVerticalOffset -14
+        // Resolve the ghost font from the host field when AX exposed it (family +
+        // point size), else fall back to the caret-height heuristic. Matching the
+        // real font is what makes the preview line up; see doc 08.
+        let ghostFont: NSFont
+        let viewFontName: String?
+        if let cf = geometry.font, let named = cf.name.flatMap({ NSFont(name: $0, size: cf.pointSize) }) {
+            ghostFont = named            // real family + size
+            viewFontName = cf.name
+        } else if let cf = geometry.font {
+            ghostFont = NSFont.systemFont(ofSize: cf.pointSize)   // real size, system family
+            viewFontName = nil
+        } else {
+            ghostFont = NSFont.systemFont(ofSize: fontSize(for: geometry))  // nothing known
+            viewFontName = nil
+        }
+        let usedFontSize = ghostFont.pointSize
+
+        // Optional fine-tune nudges. Both default to 0 — vertical placement is now
+        // computed from the font's metrics (see `baselineAlignedY`), not a magic
+        // constant. They remain overridable for edge cases, then relaunch:
+        //   defaults write com.foretype.Foretype ghostVerticalOffset 0
         //   defaults write com.foretype.Foretype ghostHorizontalOffset 0
         let defaults = UserDefaults.standard
-        // Read tolerantly: `defaults write … ghostVerticalOffset -14` stores a
+        // Read tolerantly: `defaults write … ghostVerticalOffset 2` stores a
         // STRING, which `as? Double` would silently drop (falling back to the
         // default). `double(forKey:)` coerces numeric strings, so honor the
         // override whenever the key is present in any numeric form.
@@ -112,7 +129,7 @@ final class GhostTextOverlay: OverlayPresenting {
             guard defaults.object(forKey: key) != nil else { return fallback }
             return CGFloat(defaults.double(forKey: key))
         }
-        let vOffset = tunable("ghostVerticalOffset", default: -14)
+        let vOffset = tunable("ghostVerticalOffset", default: 0)
         let hOffset = tunable("ghostHorizontalOffset", default: 0)
 
         // Anchor at the caret's trailing edge, on the caret line.
@@ -121,7 +138,7 @@ final class GhostTextOverlay: OverlayPresenting {
         // Wrap back to the field's left edge if the run would overflow the screen.
         let screenMaxX = screenMaxX(for: caretRect)
         let availableWidth = max(0, screenMaxX - originX)
-        let measured = measuredWidth(text, font: font)
+        let measured = measuredWidth(text, font: ghostFont)
 
         let wrapWidth: CGFloat?
         let frameWidth: CGFloat
@@ -142,17 +159,24 @@ final class GhostTextOverlay: OverlayPresenting {
         // Update the reused hosting view's root (no rebuild).
         hostingView.rootView = GhostTextView(
             text: text,
-            fontSize: fontSize,
+            fontName: viewFontName,
+            fontSize: usedFontSize,
             color: color,
             wrapWidth: wrapWidth
         )
 
         let frameHeight = max(1, hostingView.fittingSize.height)
+        // Lay out at the final width so the baseline query below is accurate.
+        hostingView.frame = NSRect(x: 0, y: 0, width: frameWidth, height: frameHeight)
+        hostingView.layoutSubtreeIfNeeded()
 
-        // Bottom-align the run to the caret's bottom (single line) or anchor the
-        // first wrapped line to the caret top, then apply the tunable offset.
-        let baseY = (wrapWidth == nil) ? caretRect.minY : caretRect.maxY - frameHeight
-        let frameOriginY = baseY + vOffset
+        // Align the ghost text's first-line baseline to the caret line's baseline,
+        // computed from the ghost font's metrics — replaces the old fixed -14 nudge.
+        let frameOriginY = baselineAlignedY(
+            caretRect: caretRect,
+            font: ghostFont,
+            frameHeight: frameHeight
+        ) + vOffset
 
         let frame = NSRect(
             x: frameOriginX,
@@ -161,10 +185,68 @@ final class GhostTextOverlay: OverlayPresenting {
             height: frameHeight
         )
         panel.setFrame(frame, display: true)
+
+        diag(caretRect: caretRect, font: ghostFont, viewFontName: viewFontName,
+             hadAXFont: geometry.font != nil, quality: geometry.quality,
+             frameHeight: frameHeight, frameOriginY: frameOriginY)
+    }
+
+    /// TEMPORARY file-based diagnostic for overlay vertical alignment, gated by
+    /// `defaults write com.foretype.Foretype ghostDiag -bool YES`. Writes only
+    /// structural geometry (no field text) to /tmp/foretype-ghostdiag.log.
+    private func diag(caretRect: CGRect, font: NSFont, viewFontName: String?,
+                      hadAXFont: Bool, quality: CaretQuality, frameHeight: CGFloat,
+                      frameOriginY: CGFloat) {
+        guard UserDefaults.standard.bool(forKey: "ghostDiag") else { return }
+        let baselineFromTop = hostingView.firstBaselineOffsetFromTop
+        let renderedBaseline = frameOriginY + (frameHeight - baselineFromTop)
+        let ascent = font.ascender
+        let descent = -font.descender
+        let targetBaseline = caretRect.minY + (caretRect.height - (ascent + descent)) / 2 + descent
+        let line = """
+        caret=(x:\(r(caretRect.minX)) y:\(r(caretRect.minY)) w:\(r(caretRect.width)) h:\(r(caretRect.height))) \
+        quality=\(quality) axFont=\(hadAXFont) font=\(viewFontName ?? "system")@\(r(font.pointSize)) \
+        ascent=\(r(ascent)) descent=\(r(descent)) lineHeight=\(r(font.ascender - font.descender + font.leading)) \
+        frameH=\(r(frameHeight)) baselineFromTop=\(r(baselineFromTop)) \
+        targetBaselineY=\(r(targetBaseline)) frameOriginY=\(r(frameOriginY)) renderedBaselineY=\(r(renderedBaseline))
+
+        """
+        if let data = line.data(using: .utf8) {
+            let url = URL(fileURLWithPath: "/tmp/foretype-ghostdiag.log")
+            if let handle = try? FileHandle(forWritingTo: url) {
+                handle.seekToEndOfFile(); handle.write(data); try? handle.close()
+            } else {
+                try? data.write(to: url)
+            }
+        }
+    }
+
+    private func r(_ v: CGFloat) -> String { String(format: "%.1f", v) }
+
+    /// The panel's bottom-left y (Cocoa screen coords) that lands the ghost text's
+    /// first-line baseline on the caret line's baseline. The host baseline is
+    /// derived by centering the ghost font's glyph box in the caret rect (robust
+    /// to caret rects that include line leading), and the rendered baseline is
+    /// located via the hosting view's reported first-baseline offset. Falls back
+    /// to centering the panel on the caret box if the baseline isn't reported.
+    private func baselineAlignedY(caretRect: CGRect, font: NSFont, frameHeight: CGFloat) -> CGFloat {
+        let ascent = font.ascender              // > 0, above baseline
+        let descent = -font.descender           // make positive, below baseline
+        let boxHeight = ascent + descent
+        let targetBaselineY = caretRect.minY + (caretRect.height - boxHeight) / 2 + descent
+
+        let baselineFromTop = hostingView.firstBaselineOffsetFromTop
+        if baselineFromTop.isFinite, baselineFromTop > 0 {
+            // rendered baseline (screen y) = frameOriginY + frameHeight - baselineFromTop
+            return targetBaselineY - (frameHeight - baselineFromTop)
+        }
+        // Fallback: center the whole run on the caret box.
+        return caretRect.midY - frameHeight / 2
     }
 
     /// Derive the ghost-text point size from caret height, clamped to a sane
-    /// range; clamp more tightly when caret quality is `estimated`.
+    /// range; clamp more tightly when caret quality is `estimated`. Used only as
+    /// the fallback when AX exposes no font for the field.
     private func fontSize(for geometry: OverlayGeometry) -> CGFloat {
         let raw = geometry.caretRect.height * 0.78
         let lower: CGFloat = 14

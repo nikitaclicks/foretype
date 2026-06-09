@@ -192,7 +192,8 @@ enum SnapshotFactory {
         caret: CaretGeometry? = CaretGeometry(
             rect: CGRect(x: 100, y: 200, width: 2, height: 16),
             quality: .derived,
-            observedCharWidth: 8
+            observedCharWidth: 8,
+            font: nil
         ),
         fieldRect: CGRect? = CGRect(x: 80, y: 180, width: 300, height: 24)
     ) -> FocusSnapshot {

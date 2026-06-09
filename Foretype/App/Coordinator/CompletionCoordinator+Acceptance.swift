@@ -83,7 +83,8 @@ extension CompletionCoordinator {
         return OverlayGeometry(
             caretRect: rect,
             fieldRect: nil,
-            quality: caret.quality
+            quality: caret.quality,
+            font: caret.font
         )
     }
 }

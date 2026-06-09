@@ -242,6 +242,48 @@ enum AccessibilityBridge {
         return (raw as! CFString) as String
     }
 
+    // MARK: - Parameterized attribute: font for range
+
+    /// The font applied at a sub-range, read from `AXAttributedStringForRange`'s
+    /// `AXFont` attribute. Lets the overlay render ghost text in the host field's
+    /// actual font (family + point size) instead of guessing from caret height
+    /// (doc 08). Returns `(name, pointSize)`; `name` may be nil if only a size is
+    /// exposed. nil when the host doesn't support attributed strings (common for
+    /// some web fields) — callers fall back to the caret-height heuristic.
+    static func fontForRange(_ element: AXUIElement, location: Int, length: Int) -> (name: String?, pointSize: CGFloat)? {
+        guard location >= 0, length > 0 else { return nil }
+        var cfRange = CFRange(location: location, length: length)
+        guard let rangeValue = AXValueCreate(.cfRange, &cfRange) else { return nil }
+        var result: CFTypeRef?
+        let err = AXUIElementCopyParameterizedAttributeValue(
+            element,
+            kAXAttributedStringForRangeParameterizedAttribute as CFString,
+            rangeValue,
+            &result
+        )
+        guard err == .success, let raw = result,
+              CFGetTypeID(raw) == CFAttributedStringGetTypeID() else { return nil }
+        let attributed = raw as! CFAttributedString
+        guard CFAttributedStringGetLength(attributed) > 0 else { return nil }
+
+        // The AXFont attribute value is a dictionary keyed by AXFontName /
+        // AXFontSize. The ApplicationServices symbol constants import as
+        // `Unmanaged<CFString>`, so we use the raw key strings directly — matching
+        // the marker-range / enhanced-AX keys elsewhere in this file.
+        guard let fontRaw = CFAttributedStringGetAttribute(attributed, 0, "AXFont" as CFString, nil),
+              CFGetTypeID(fontRaw) == CFDictionaryGetTypeID() else { return nil }
+        let dict = fontRaw as! CFDictionary as NSDictionary
+
+        let name = dict["AXFontName"] as? String
+
+        var pointSize: CGFloat?
+        if let n = dict["AXFontSize"] as? NSNumber {
+            pointSize = CGFloat(truncating: n)
+        }
+        guard let size = pointSize, size.isFinite, size > 0 else { return nil }
+        return (name: name, pointSize: size)
+    }
+
     // MARK: - Identity
 
     /// A stable-ish hash of the element (CFHash). May recycle across elements,

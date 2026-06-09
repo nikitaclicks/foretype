@@ -8,7 +8,11 @@ import SwiftUI
 struct GhostTextView: View {
     /// The remainder of the active session to preview.
     let text: String
-    /// Point size derived from the caret height (clamped by the controller).
+    /// The host field's font family, when AX exposed it; `nil` falls back to the
+    /// system font. Matching the family makes the preview read as the same text.
+    let fontName: String?
+    /// Point size: the host field's real size when known, else a caret-height
+    /// estimate (resolved by the controller).
     let fontSize: CGFloat
     /// Resolved ghost-text color (configured tone, or a secondary-label default).
     let color: Color
@@ -16,9 +20,18 @@ struct GhostTextView: View {
     /// the text run as wide as it needs (single visual line).
     let wrapWidth: CGFloat?
 
+    /// Match the host font family when known (fixed size — never scaled by Dynamic
+    /// Type, since we mirror the field's literal point size), else the system font.
+    private var resolvedFont: Font {
+        if let fontName, !fontName.isEmpty {
+            return .custom(fontName, fixedSize: fontSize)
+        }
+        return .system(size: fontSize)
+    }
+
     var body: some View {
         Text(text)
-            .font(.system(size: fontSize))
+            .font(resolvedFont)
             .foregroundColor(color)
             // Wrap onto subsequent lines when a width is supplied; otherwise the
             // run stays on one line and the panel sizes to fit it.

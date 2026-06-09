@@ -14,11 +14,16 @@ enum CaretGeometryResolver {
     static func resolve(element: AXUIElement, selection: NSRange) -> CaretGeometry? {
         let caret = max(0, selection.location)
 
+        // The host field's font at the caret, so the overlay can match family +
+        // point size instead of guessing from caret height (doc 08). Best-effort:
+        // nil for hosts without attributed-string support (some web fields).
+        let font = resolveFont(element: element, caret: caret)
+
         // Step 1: zero-length bounds at the caret → exact.
         if let axRect = AccessibilityBridge.boundsForRange(element, location: caret, length: 0),
            isUsableCaretRect(axRect),
            let cocoa = AccessibilityBridge.axRectToCocoa(axRect) {
-            return CaretGeometry(rect: normalizedCaretRect(cocoa), quality: .exact, observedCharWidth: nil)
+            return CaretGeometry(rect: normalizedCaretRect(cocoa), quality: .exact, observedCharWidth: nil, font: font)
         }
 
         // Step 2: web text-marker bounds → derived. Chromium/WebKit hosts (Chrome,
@@ -29,7 +34,7 @@ enum CaretGeometryResolver {
         if let axRect = AccessibilityBridge.boundsForSelectedTextMarkerRange(of: element),
            isUsableCaretRect(axRect),
            let cocoa = AccessibilityBridge.axRectToCocoa(axRect) {
-            return CaretGeometry(rect: normalizedCaretRect(cocoa), quality: .derived, observedCharWidth: nil)
+            return CaretGeometry(rect: normalizedCaretRect(cocoa), quality: .derived, observedCharWidth: nil, font: font)
         }
 
         // Step 3: character-before, shifted to its trailing edge → derived.
@@ -47,7 +52,8 @@ enum CaretGeometryResolver {
                 return CaretGeometry(
                     rect: normalizedCaretRect(cocoa),
                     quality: .derived,
-                    observedCharWidth: axRect.width > 0 ? axRect.width : nil
+                    observedCharWidth: axRect.width > 0 ? axRect.width : nil,
+                    font: font
                 )
             }
         }
@@ -57,7 +63,7 @@ enum CaretGeometryResolver {
         // both NSRange and collapsed text-marker bounds, but DO expose real frames
         // on the rendered AXStaticText runs (often nested several groups deep). We
         // locate the run containing the caret offset and interpolate within it.
-        if let derived = proportionalWithinRuns(element: element, caret: caret) {
+        if let derived = proportionalWithinRuns(element: element, caret: caret, font: font) {
             return derived
         }
 
@@ -74,9 +80,24 @@ enum CaretGeometryResolver {
                 width: 1,
                 height: min(cocoa.height, 24)
             )
-            return CaretGeometry(rect: caretRect, quality: .estimated, observedCharWidth: nil)
+            return CaretGeometry(rect: caretRect, quality: .estimated, observedCharWidth: nil, font: font)
         }
 
+        return nil
+    }
+
+    // MARK: - Font
+
+    /// Read the host font at the caret, probing the glyph just before the caret
+    /// first (it shares the typed run), then the glyph at the caret, then the
+    /// field start. Returns nil when no probe yields a font.
+    private static func resolveFont(element: AXUIElement, caret: Int) -> CaretFont? {
+        let probes: [(Int, Int)] = caret > 0 ? [(caret - 1, 1), (caret, 1), (0, 1)] : [(caret, 1), (0, 1)]
+        for (loc, len) in probes {
+            if let f = AccessibilityBridge.fontForRange(element, location: loc, length: len) {
+                return CaretFont(name: f.name, pointSize: f.pointSize)
+            }
+        }
         return nil
     }
 
@@ -87,7 +108,7 @@ enum CaretGeometryResolver {
     /// within that run's real frame. Quality `.derived`. Bounded by a node budget
     /// and a depth cap so a huge document can't stall a poll (we "get out of the
     /// way" — return nil → estimated — rather than walk an unbounded tree).
-    private static func proportionalWithinRuns(element: AXUIElement, caret: Int) -> CaretGeometry? {
+    private static func proportionalWithinRuns(element: AXUIElement, caret: Int, font: CaretFont?) -> CaretGeometry? {
         var consumed = 0
         var budget = 1500
         var result: CaretGeometry?
@@ -118,7 +139,8 @@ enum CaretGeometryResolver {
                             result = CaretGeometry(
                                 rect: normalizedCaretRect(cocoa),
                                 quality: .derived,
-                                observedCharWidth: charWidth > 0 ? charWidth : nil
+                                observedCharWidth: charWidth > 0 ? charWidth : nil,
+                                font: font
                             )
                             return
                         }

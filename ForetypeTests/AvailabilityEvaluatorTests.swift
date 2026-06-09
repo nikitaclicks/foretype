@@ -12,7 +12,8 @@ struct AvailabilityEvaluatorTests {
         caret: CaretGeometry? = CaretGeometry(
             rect: CGRect(x: 10, y: 20, width: 1, height: 16),
             quality: .derived,
-            observedCharWidth: 7
+            observedCharWidth: 7,
+            font: nil
         ),
         fieldRect: CGRect? = CGRect(x: 0, y: 0, width: 300, height: 24),
         isSecure: Bool = false,
@@ -101,7 +102,7 @@ struct AvailabilityEvaluatorTests {
     }
 
     @Test func fieldUnsupported_whenCaretEstimated() {
-        let caret = CaretGeometry(rect: CGRect(x: 0, y: 0, width: 1, height: 16), quality: .estimated, observedCharWidth: nil)
+        let caret = CaretGeometry(rect: CGRect(x: 0, y: 0, width: 1, height: 16), quality: .estimated, observedCharWidth: nil, font: nil)
         #expect(evaluate(snapshot: makeSnapshot(caret: caret)) == .disabled(.fieldUnsupported))
     }
 
@@ -123,7 +124,7 @@ struct AvailabilityEvaluatorTests {
     }
 
     @Test func mayGenerate_withExactCaretQuality() {
-        let caret = CaretGeometry(rect: CGRect(x: 0, y: 0, width: 1, height: 16), quality: .exact, observedCharWidth: 7)
+        let caret = CaretGeometry(rect: CGRect(x: 0, y: 0, width: 1, height: 16), quality: .exact, observedCharWidth: 7, font: nil)
         #expect(evaluate(snapshot: makeSnapshot(caret: caret)) == .mayGenerate)
     }
 }

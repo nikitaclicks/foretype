@@ -95,7 +95,8 @@ extension CompletionCoordinator {
         return OverlayGeometry(
             caretRect: caret.rect,
             fieldRect: snapshot.fieldRect,
-            quality: caret.quality
+            quality: caret.quality,
+            font: caret.font
         )
     }
 }

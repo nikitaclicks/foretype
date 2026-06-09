@@ -5,6 +5,7 @@ struct OverlayGeometry: Equatable, Sendable {
     let caretRect: CGRect      // Cocoa screen coords
     let fieldRect: CGRect?     // editable field bounds, for wrapping
     let quality: CaretQuality
+    let font: CaretFont?       // host field font, when AX exposes it
 }
 
 /// What the overlay is currently showing. The overlay is a dumb renderer; the

@@ -19,13 +19,23 @@ enum CaretQuality: Equatable, Sendable {
     case estimated
 }
 
+/// The host field's font at the caret, read from Accessibility so the overlay
+/// can render ghost text in the field's real family + point size rather than
+/// guessing from caret height (doc 08). `name` is nil when AX exposes only a
+/// size; the whole value is nil on `CaretGeometry` when no font could be read.
+struct CaretFont: Equatable, Sendable {
+    let name: String?
+    let pointSize: CGFloat
+}
+
 /// The caret's on-screen rectangle (Cocoa screen coordinates) plus a quality
-/// rating and an optional observed character width (used for caret prediction
-/// during insertion, doc 08).
+/// rating, an optional observed character width (used for caret prediction
+/// during insertion, doc 08), and the host field's font when AX exposes it.
 struct CaretGeometry: Equatable, Sendable {
     let rect: CGRect
     let quality: CaretQuality
     let observedCharWidth: CGFloat?
+    let font: CaretFont?
 }
 
 /// Whether a focused field can be completed against.
