@@ -8,6 +8,11 @@ TAP_NAME="tap"                # → brew install --cask $GH_USER/$TAP_NAME/foret
 APP_NAME="Foretype"
 BUNDLE_ID="com.foretype.Foretype"
 
+# Local clone of the tap repo (github.com/$GH_USER/homebrew-$TAP_NAME). release.sh
+# syncs the cask here and pushes it so `brew install` matches the release. Defaults
+# to ~/dev/homebrew-tap; override by exporting FORETYPE_TAP_DIR=/some/path.
+TAP_DIR="${FORETYPE_TAP_DIR:-$HOME/dev/homebrew-tap}"
+
 DIST_DIR="$REPO_ROOT/dist"
 CASK_FILE="$DIST_DIR/Casks/foretype.rb"
 PBXPROJ="$REPO_ROOT/${APP_NAME}.xcodeproj/project.pbxproj"

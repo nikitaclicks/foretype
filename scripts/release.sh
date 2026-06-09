@@ -71,23 +71,35 @@ git push origin HEAD --tags
 gh release create "v$VERSION" "$ZIP_PATH" \
   --repo "$REPO" --title "v$VERSION" --generate-notes
 
-# --- Sync the cask into the tap repo -----------------------------------------
-if [ -n "${FORETYPE_TAP_DIR:-}" ] && [ -d "$FORETYPE_TAP_DIR" ]; then
-  echo "▸ Updating tap at ${FORETYPE_TAP_DIR}…"
-  mkdir -p "$FORETYPE_TAP_DIR/Casks"
-  cp "$CASK_FILE" "$FORETYPE_TAP_DIR/Casks/foretype.rb"
-  git -C "$FORETYPE_TAP_DIR" add Casks/foretype.rb
-  git -C "$FORETYPE_TAP_DIR" commit -m "foretype $VERSION"
-  git -C "$FORETYPE_TAP_DIR" push
-  echo "  · tap updated"
+# --- Sync the cask into the tap repo (so `brew install` matches the release) -
+# This MUST happen or installs fail with a sha mismatch — the cask brew reads
+# lives in the tap, not this repo. Defaults to ~/dev/homebrew-tap (see lib.sh).
+if [ -d "$TAP_DIR/.git" ]; then
+  echo "▸ Syncing cask into tap ($TAP_DIR)…"
+  mkdir -p "$TAP_DIR/Casks"
+  cp "$CASK_FILE" "$TAP_DIR/Casks/foretype.rb"
+  git -C "$TAP_DIR" add Casks/foretype.rb
+  if git -C "$TAP_DIR" diff --cached --quiet; then
+    echo "  · tap already up to date"
+  else
+    git -C "$TAP_DIR" commit -q -m "foretype $VERSION"
+  fi
+  git -C "$TAP_DIR" push -q
+  echo "  · tap pushed"
 else
   echo
-  echo "ℹ Tap not auto-updated (set FORETYPE_TAP_DIR=~/dev/homebrew-tap to sync + push it)."
-  echo "  Copy dist/Casks/foretype.rb into the tap's Casks/ and push, or update by hand:"
-  echo "    version \"$VERSION\""
-  echo "    sha256 \"$SHA\""
+  echo "╔══════════════════════════════════════════════════════════════════╗"
+  echo "║ ⚠  TAP NOT SYNCED — \`brew install\` WILL FAIL with a sha mismatch.  ║"
+  echo "╚══════════════════════════════════════════════════════════════════╝"
+  echo "  No tap clone found at: $TAP_DIR"
+  echo "  Clone it there (then future releases sync automatically):"
+  echo "    git clone git@github.com:${GH_USER}/homebrew-${TAP_NAME}.git \"$TAP_DIR\""
+  echo "  …or sync this release by hand now:"
+  echo "    cp dist/Casks/foretype.rb \"\$TAP\"/Casks/ && \\"
+  echo "      git -C \"\$TAP\" commit -am 'foretype $VERSION' && git -C \"\$TAP\" push"
+  echo "    (where \$TAP is your local homebrew-tap clone)"
 fi
 
 echo
 echo "✓ Released v$VERSION → https://github.com/${REPO}/releases/tag/v$VERSION"
-echo "  Install: brew install --cask ${GH_USER}/${TAP_NAME}/foretype"
+echo "  Install: brew update && brew install --cask ${GH_USER}/${TAP_NAME}/foretype"
