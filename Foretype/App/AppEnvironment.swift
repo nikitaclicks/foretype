@@ -34,7 +34,7 @@ final class AppEnvironment: ObservableObject {
     init() {
         let permissions = PermissionMonitor()
         let settings = SettingsStore()
-        let focus = FocusWatcher()
+        let focus = FocusWatcher(settings: settings)
         let inputGuard = SyntheticInputGuard()
         let keyboardTap = KeyboardTap(guard: inputGuard)
         let inserter = TextInserter(guard: inputGuard)

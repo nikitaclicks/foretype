@@ -24,6 +24,34 @@ supports two completion backends:
 - **Privacy:** the default backend runs on-device; nothing leaves the machine
   unless you configure a remote HTTP endpoint.
 
+## Install
+
+```sh
+brew install --cask nikitaclicks/tap/foretype
+```
+
+This taps [`nikitaclicks/homebrew-tap`](https://github.com/nikitaclicks/homebrew-tap)
+and installs the latest release into `/Applications`. To upgrade later:
+`brew upgrade --cask foretype`.
+
+### Notarization
+
+Foretype is **not notarized**, and by installing it you acknowledge that. The
+Homebrew cask removes the `com.apple.quarantine` attribute on install, so the app
+launches without any Gatekeeper "unidentified developer" warning — and **without
+disabling SIP**. It is still signed with a real Apple Development identity, which
+is what lets macOS keep your Accessibility / Input Monitoring grants across
+updates.
+
+If you'd rather download the `.zip` manually from the
+[Releases](https://github.com/nikitaclicks/foretype/releases) page, macOS will
+quarantine it. Clear the flag once, then open it:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Foretype.app
+open /Applications/Foretype.app
+```
+
 ## Build and run
 
 Requires Xcode (with a recent macOS SDK) on Apple Silicon.

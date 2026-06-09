@@ -5,6 +5,9 @@
 DerivedData/
 *.xcuserstate
 
+# Release artifacts (the cask in dist/Casks/ is committed; the zip is not)
+/dist/*.zip
+
 # macOS
 .DS_Store
 

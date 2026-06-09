@@ -28,7 +28,28 @@ final class FocusWatcher: FocusProviding {
     // MARK: State
 
     private var timer: Timer?
-    private var pollInterval: TimeInterval = 0.050
+
+    /// Read-only settings access for the cheap per-tick gate (global toggle +
+    /// app rules). Lets the watcher avoid issuing ANY cross-process AX IPC for an
+    /// app/state where completion is impossible (doc 03; perf: see `pollDiag`).
+    private let settings: SettingsProviding
+
+    // Adaptive cadence (doc 03 polling, made demand-driven). The poll runs at one of
+    // three intervals depending on the last tick's outcome, so heavy AX resolution —
+    // and the IPC load it puts on the *frontmost* app — only happens when it can pay
+    // off. `currentInterval` is the live timer period; the others are the targets.
+    /// Live timer period.
+    private var currentInterval: TimeInterval = 0.050
+    /// Fast: a supported field is focused (caret tracking while typing). User-tunable
+    /// via `setPollInterval`; this is the "20 Hz" cadence the design assumed.
+    private var fastInterval: TimeInterval = 0.050
+    /// Medium: an eligible app is frontmost but no supported field yet — poll often
+    /// enough to notice a field appearing, without hammering.
+    private let mediumInterval: TimeInterval = 0.220
+    /// Idle: gate failed (feature off, not trusted, or app disabled by rule). No
+    /// heavy AX work at all; just a slow heartbeat to notice the gate re-opening.
+    private let idleInterval: TimeInterval = 0.500
+
     /// Monotonic counter incremented on every genuine focus *identity* change.
     private var changeSequence: UInt64 = 0
     /// Identity (minus changeSequence) of the last element we treated as focused,
@@ -48,27 +69,55 @@ final class FocusWatcher: FocusProviding {
     /// small window absorbs it while a genuine focus change still lands promptly.
     private let focusGraceTicks = 4
     /// Apps we've already opted into exposing their full AX tree, so we set
-    /// `AXManualAccessibility` once per app rather than on every poll.
+    /// `AXManualAccessibility` once per app rather than on every poll. Pruned when an
+    /// app terminates (see `terminationObserver`) so it can't grow unbounded across a
+    /// long session of app switches.
     private var enhancedAccessibilityPIDs: Set<pid_t> = []
+    /// Token for the app-termination observer that prunes `enhancedAccessibilityPIDs`.
+    private var terminationObserver: NSObjectProtocol?
 
-    init() {
+    // MARK: Diagnostics (Phase A — `pollDiag`)
+    /// Accumulators for the once-per-second poll summary. Bookkeeping is a couple of
+    /// adds per tick (negligible); the file write at the window boundary is gated on
+    /// the `pollDiag` UserDefaults flag, so a normal run pays nothing but the math.
+    private var diagWindowStart: ContinuousClock.Instant?
+    private var diagTicks = 0
+    private var diagDurationTotalMS = 0.0
+    private var diagDurationMaxMS = 0.0
+    private var diagAXCallsAtWindowStart = 0
+
+    init(settings: SettingsProviding) {
+        self.settings = settings
         var cont: AsyncStream<FocusSnapshot>.Continuation!
         self.snapshots = AsyncStream { cont = $0 }
         self.continuation = cont
+
+        // Prune the enhanced-AX opt-in set when an app quits, so it tracks live apps
+        // rather than accumulating dead PIDs across a long session.
+        terminationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            else { return }
+            MainActor.assumeIsolated {
+                self?.enhancedAccessibilityPIDs.remove(app.processIdentifier)
+            }
+        }
+    }
+
+    deinit {
+        if let token = terminationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+        }
     }
 
     // MARK: Lifecycle
 
     func start() {
         stop()
-        let t = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.poll()
-            }
-        }
-        t.tolerance = pollInterval * 0.2
-        RunLoop.main.add(t, forMode: .common)
-        self.timer = t
+        scheduleTimer()
         // Immediate first read so we don't wait a full interval after start.
         poll()
     }
@@ -80,11 +129,59 @@ final class FocusWatcher: FocusProviding {
 
     func setPollInterval(milliseconds: Int) {
         let clamped = min(500, max(10, milliseconds))
-        pollInterval = TimeInterval(clamped) / 1000.0
-        // Restart the timer if running so the new cadence takes effect.
-        if timer != nil {
-            start()
+        let newFast = TimeInterval(clamped) / 1000.0
+        // If we're currently in fast mode, apply the new cadence immediately;
+        // otherwise it takes effect the next time a supported field is focused.
+        let wasFast = abs(currentInterval - fastInterval) < 0.0001
+        fastInterval = newFast
+        if timer != nil, wasFast { setCadence(fastInterval) }
+    }
+
+    /// (Re)install the repeating timer at `currentInterval`. Safe to call from
+    /// within the firing timer's own callback (we invalidate first).
+    private func scheduleTimer() {
+        timer?.invalidate()
+        let t = Timer.scheduledTimer(withTimeInterval: currentInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.poll()
+            }
         }
+        t.tolerance = currentInterval * 0.2
+        RunLoop.main.add(t, forMode: .common)
+        self.timer = t
+    }
+
+    /// Switch the poll cadence, rescheduling the timer only when it actually changes
+    /// (so a steady state never churns timers — `start()` invalidates first anyway).
+    private func setCadence(_ desired: TimeInterval) {
+        guard abs(desired - currentInterval) > 0.0001 else { return }
+        currentInterval = desired
+        if timer != nil { scheduleTimer() }
+    }
+
+    /// Cheap precondition check — NO cross-process AX IPC. Mirrors the fundamental
+    /// preconditions in `AvailabilityEvaluator` (trust + global toggle + app rule)
+    /// so we can skip the expensive focus/caret resolution entirely for an app or
+    /// state where completion is impossible. `isTrusted()` and `frontmostApp()` are
+    /// local (TCC check / NSWorkspace), not AX tree reads.
+    private func passesCheapGate() -> Bool {
+        guard AccessibilityBridge.isTrusted() else { return false }
+        let current = settings.current
+        guard current.isEnabled else { return false }
+        let bundleID = AccessibilityBridge.frontmostApp()?.bundleID ?? ""
+        return AppRuleEvaluator.isEnabled(bundleID: bundleID, settings: current)
+    }
+
+    /// Clear focus once on transition to "nothing usable". Shared by the gated-off
+    /// and no-snapshot paths.
+    private func clearFocusIfNeeded() {
+        guard current != nil else { return }
+        current = nil
+        lastElementHash = nil
+        lastPID = nil
+        lastSignature = nil
+        // FocusProviding has no "nil event" channel; the coordinator reads `current`
+        // on its own ticks / focus stream. We simply clear.
     }
 
     // MARK: Poll
@@ -113,16 +210,23 @@ final class FocusWatcher: FocusProviding {
     }
 
     private func poll() {
+        let tickStart = ContinuousClock().now
+        defer { recordPollDiag(tickStart: tickStart) }
+
+        // Cheap gate first: for a disabled feature / disabled app / no AX trust we do
+        // NO heavy AX resolution and issue zero IPC into the frontmost app — just
+        // idle and wait for the gate to re-open. This is the bulk of the perf win.
+        guard passesCheapGate() else {
+            clearFocusIfNeeded()
+            setCadence(idleInterval)
+            return
+        }
+
         guard let snapshot = buildSnapshot() else {
-            // Nothing usable focused. Publish the transition to nil only once.
-            if current != nil {
-                current = nil
-                lastElementHash = nil
-                lastPID = nil
-                lastSignature = nil
-                // Note: FocusProviding has no "nil event" channel; the coordinator
-                // reads `current` on its own ticks / focus stream. We simply clear.
-            }
+            clearFocusIfNeeded()
+            // Eligible app, nothing usable focused yet: poll at medium so a field
+            // that appears is picked up promptly, without 20 Hz hammering.
+            setCadence(mediumInterval)
             return
         }
 
@@ -134,6 +238,11 @@ final class FocusWatcher: FocusProviding {
             // imperceptibly); cheap and avoids serving a stale rect on refreshNow.
             current = snapshot
         }
+
+        // Fast only while a supported field is active (caret tracking while typing);
+        // otherwise medium — an eligible app with an unsupported/secure field doesn't
+        // need 20 Hz.
+        setCadence(snapshot.capability == .supported ? fastInterval : mediumInterval)
     }
 
     /// Build a snapshot from the live AX tree, or nil when nothing usable is
@@ -328,5 +437,62 @@ final class FocusWatcher: FocusProviding {
                 || abs(x.width - y.width) > 1.0
                 || abs(x.height - y.height) > 1.0
         }
+    }
+
+    // MARK: Diagnostics (Phase A)
+
+    /// Accumulate per-tick timing and, once a ~1 s window elapses, flush a summary to
+    /// `/tmp/foretype-polldiag.log` (gated on the `pollDiag` UserDefaults flag, like
+    /// `ghostDiag`). Captures the AX-IPC traffic the poll generates so we can confirm
+    /// whether system lag tracks poll activity, and later prove the gating cut it.
+    private func recordPollDiag(tickStart: ContinuousClock.Instant) {
+        let now = ContinuousClock().now
+        let tickMS = Self.milliseconds(tickStart.duration(to: now))
+
+        if diagWindowStart == nil {
+            diagWindowStart = tickStart
+            diagAXCallsAtWindowStart = AccessibilityBridge.axCallCount
+        }
+        diagTicks += 1
+        diagDurationTotalMS += tickMS
+        diagDurationMaxMS = max(diagDurationMaxMS, tickMS)
+
+        guard let windowStart = diagWindowStart else { return }
+        let windowSeconds = Self.milliseconds(windowStart.duration(to: now)) / 1000.0
+        guard windowSeconds >= 1.0 else { return }
+
+        // Window elapsed: emit (if enabled) and reset.
+        if UserDefaults.standard.bool(forKey: "pollDiag") {
+            let axCalls = AccessibilityBridge.axCallCount &- diagAXCallsAtWindowStart
+            let callsPerSec = Double(axCalls) / windowSeconds
+            let avgTickMS = diagTicks > 0 ? diagDurationTotalMS / Double(diagTicks) : 0
+            let bundle = AccessibilityBridge.frontmostApp()?.bundleID ?? "?"
+            let supported = current?.capability == .supported
+            let line = String(
+                format: "axCalls/s=%.0f ticks/s=%.0f avgTickMs=%.2f maxTickMs=%.2f interval=%.0fms frontmost=%@ supported=%@\n",
+                callsPerSec, Double(diagTicks) / windowSeconds, avgTickMS,
+                diagDurationMaxMS, currentInterval * 1000.0, bundle, supported ? "Y" : "N"
+            )
+            if let data = line.data(using: .utf8) {
+                let url = URL(fileURLWithPath: "/tmp/foretype-polldiag.log")
+                if let handle = try? FileHandle(forWritingTo: url) {
+                    handle.seekToEndOfFile(); handle.write(data); try? handle.close()
+                } else {
+                    try? data.write(to: url)
+                }
+            }
+        }
+
+        diagWindowStart = now
+        diagAXCallsAtWindowStart = AccessibilityBridge.axCallCount
+        diagTicks = 0
+        diagDurationTotalMS = 0
+        diagDurationMaxMS = 0
+    }
+
+    /// `Duration` → milliseconds (1 ms == 1e15 attoseconds).
+    private static func milliseconds(_ d: Duration) -> Double {
+        let c = d.components
+        return Double(c.seconds) * 1000.0 + Double(c.attoseconds) / 1e15
     }
 }

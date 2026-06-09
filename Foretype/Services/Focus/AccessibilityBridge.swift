@@ -9,6 +9,15 @@ import ApplicationServices
 @MainActor
 enum AccessibilityBridge {
 
+    // MARK: - Diagnostics (Phase A)
+
+    /// Monotonic count of cross-process AX IPC calls issued (every
+    /// `AXUIElementCopy*`). A bare `Int` increment is effectively free, so it runs
+    /// unconditionally; only the *reporting* of it (FocusWatcher's `pollDiag` flush)
+    /// is gated. Used to measure how much AX traffic the poll generates and confirm
+    /// the lag hypothesis. Read-and-reset by the diagnostics sink.
+    static var axCallCount = 0
+
     // MARK: - System focus & frontmost app
 
     /// The system-wide focused UI element, or nil if none / not trusted.
@@ -79,6 +88,7 @@ enum AccessibilityBridge {
 
     /// Raw attribute copy. Returns nil for any non-success status.
     static func copyAttribute(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
+        axCallCount &+= 1
         var value: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         guard err == .success else { return nil }
@@ -163,6 +173,7 @@ enum AccessibilityBridge {
         guard location >= 0, length >= 0 else { return nil }
         var cfRange = CFRange(location: location, length: length)
         guard let rangeValue = AXValueCreate(.cfRange, &cfRange) else { return nil }
+        axCallCount &+= 1
         var result: CFTypeRef?
         let err = AXUIElementCopyParameterizedAttributeValue(
             element,
@@ -208,6 +219,7 @@ enum AccessibilityBridge {
 
     /// Ask `element` for the bounds of an opaque `AXTextMarkerRange`.
     private static func boundsForTextMarkerRange(_ element: AXUIElement, _ markerRange: CFTypeRef) -> CGRect? {
+        axCallCount &+= 1
         var result: CFTypeRef?
         let err = AXUIElementCopyParameterizedAttributeValue(
             element,
@@ -231,6 +243,7 @@ enum AccessibilityBridge {
         guard location >= 0, length >= 0 else { return nil }
         var cfRange = CFRange(location: location, length: length)
         guard let rangeValue = AXValueCreate(.cfRange, &cfRange) else { return nil }
+        axCallCount &+= 1
         var result: CFTypeRef?
         let err = AXUIElementCopyParameterizedAttributeValue(
             element,
@@ -254,6 +267,7 @@ enum AccessibilityBridge {
         guard location >= 0, length > 0 else { return nil }
         var cfRange = CFRange(location: location, length: length)
         guard let rangeValue = AXValueCreate(.cfRange, &cfRange) else { return nil }
+        axCallCount &+= 1
         var result: CFTypeRef?
         let err = AXUIElementCopyParameterizedAttributeValue(
             element,
