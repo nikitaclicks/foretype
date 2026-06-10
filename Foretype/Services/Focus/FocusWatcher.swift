@@ -76,25 +76,6 @@ final class FocusWatcher: FocusProviding {
     /// Token for the app-termination observer that prunes `enhancedAccessibilityPIDs`.
     private var terminationObserver: NSObjectProtocol?
 
-    // MARK: Caret stability gate
-    /// Some Chromium hosts (notably ClickUp's CSS-transformed chat side-panel
-    /// composer) report the focused element's geometry chaotically during re-layout
-    /// (each AI-suggestion regeneration): the whole subtree's x, y AND width jump
-    /// between a correct regime and one or more wrong ones, sometimes for sustained
-    /// stretches. No coordinate is trustworthy and there is no stable geometric
-    /// anchor or identity to recover the true position from. Per the app's
-    /// correctness-or-nothing rule we instead DETECT the instability and withhold
-    /// the caret (→ overlay hides) rather than place the ghost at a lying position.
-    ///
-    /// The field the user is editing is pinned by TEXT-EDIT CONTINUITY (their typed
-    /// text grows/shrinks continuously even while geometry lies), independent of the
-    /// unstable frame. We keep a reference caret-Y from stable readings; a caret-Y
-    /// that deviates from it while editing the same text is the host lying → hide,
-    /// and the bad Y is never adopted as the reference (so even a *sustained* wrong
-    /// regime stays hidden until the geometry returns to the established position).
-    private var editAnchorY: CGFloat?
-    private var editAnchorText: String?
-    private var editAnchorPID: pid_t?
 
     // MARK: Diagnostics (Phase A — `pollDiag`)
     /// Accumulators for the once-per-second poll summary. Bookkeeping is a couple of
@@ -200,9 +181,6 @@ final class FocusWatcher: FocusProviding {
         lastElementHash = nil
         lastPID = nil
         lastSignature = nil
-        editAnchorY = nil
-        editAnchorText = nil
-        editAnchorPID = nil
         // FocusProviding has no "nil event" channel; the coordinator reads `current`
         // on its own ticks / focus stream. We simply clear.
     }
@@ -218,20 +196,18 @@ final class FocusWatcher: FocusProviding {
     }
 
     /// A stable structural signature for `element`, used to recognize the same
-    /// logical field across `CFHash` churn. Uses role + subrole + frame origin x +
-    /// width — deliberately NOT y or height: editors grow vertically while staying
-    /// the same field, and some hosts (ClickUp's CSS-transformed side-panel
-    /// composer under Chromium) transiently report the whole subtree at a wrong y
-    /// while it stays the same field. Including y there would tear identity on every
-    /// transform flip and defeat the caret stabilizer's anchor. Rounded to whole
-    /// points to tolerate sub-pixel jitter. Returns nil when no frame is exposed.
+    /// logical field across `CFHash` churn. Uses role + subrole + frame origin and
+    /// width (NOT height — editors grow vertically while staying the same field).
+    /// Rounded to whole points to tolerate sub-pixel jitter. Returns nil when the
+    /// element exposes no frame to anchor on.
     private func focusSignature(of element: AXUIElement) -> String? {
         guard let frame = AccessibilityBridge.frame(element) else { return nil }
         let role = AccessibilityBridge.string(element, kAXRoleAttribute) ?? ""
         let subrole = AccessibilityBridge.string(element, kAXSubroleAttribute) ?? ""
         let x = Int(frame.origin.x.rounded())
+        let y = Int(frame.origin.y.rounded())
         let w = Int(frame.size.width.rounded())
-        return "\(role)|\(subrole)|\(x)|\(w)"
+        return "\(role)|\(subrole)|\(x)|\(y)|\(w)"
     }
 
     private func poll() {
@@ -386,8 +362,7 @@ final class FocusWatcher: FocusProviding {
 
         let fieldRect = AccessibilityBridge.frame(resolution.element)
             .flatMap { AccessibilityBridge.axRectToCocoa($0) }
-        let resolved = CaretGeometryResolver.resolve(element: resolution.element, selection: resolution.selection, fieldRect: fieldRect)
-        let caret = resolved.flatMap { gateUnstableCaret($0, pid: identity.pid, preceding: resolution.precedingText) }
+        let caret = CaretGeometryResolver.resolve(element: resolution.element, selection: resolution.selection, fieldRect: fieldRect)
 
         // Correctness-or-nothing: only a caret of at least `derived` quality makes
         // a field supported (doc 03). Web hosts reach this via the text-marker path.
@@ -413,61 +388,6 @@ final class FocusWatcher: FocusProviding {
         )
     }
 
-
-    /// Caret stability gate (see the `editAnchorY` note). Returns the caret when the
-    /// geometry is trustworthy, or nil to withhold it (overlay hides) when the host
-    /// is reporting a lying position. The field is tracked by text-edit continuity,
-    /// not geometry, so a chaotic frame can't masquerade as a different field and
-    /// reset the reference.
-    private func gateUnstableCaret(_ caret: CaretGeometry, pid: pid_t, preceding: String) -> CaretGeometry? {
-        func tunable(_ key: String, _ fallback: CGFloat) -> CGFloat {
-            UserDefaults.standard.object(forKey: key) != nil
-                ? CGFloat(UserDefaults.standard.double(forKey: key)) : fallback
-        }
-        // Larger than any single-poll typing/wrapping caret move (≤ a line or two),
-        // smaller than a geometry-regime jump (hundreds of px).
-        let jumpThreshold = tunable("caretJumpThreshold", 60)
-        let y = caret.rect.midY
-
-        // Same field the user is editing? Pinned by text continuity, not geometry.
-        let sameEdit = pid == editAnchorPID
-            && editAnchorText != nil
-            && isContinuousEdit(editAnchorText!, preceding)
-
-        guard sameEdit, let anchorY = editAnchorY else {
-            // New / different editing context: adopt this reading as the reference.
-            editAnchorPID = pid
-            editAnchorText = preceding
-            editAnchorY = y
-            return caret
-        }
-
-        // Track the text either way so continuity follows ongoing typing.
-        editAnchorText = preceding
-
-        if abs(y - anchorY) <= jumpThreshold {
-            // Stable: normal caret movement. Update the reference and show.
-            editAnchorY = y
-            return caret
-        }
-
-        // The caret jumped while the user kept editing the same text — the field did
-        // not truly move, so the host geometry is lying. Withhold the caret (hide)
-        // and DO NOT adopt the bad Y, so a sustained wrong regime stays hidden until
-        // the geometry returns to the established position.
-        return nil
-    }
-
-    /// Whether `now` is a continuous text-edit of `prev` (typing, deleting, small
-    /// corrections) rather than a switch to a different field/content. Compares the
-    /// caret-preceding windows by common-prefix ratio; tolerant of the windowing tail.
-    private func isContinuousEdit(_ prev: String, _ now: String) -> Bool {
-        if prev.isEmpty || now.isEmpty { return prev.isEmpty && now.isEmpty ? true : (abs(prev.count - now.count) <= 2) }
-        let a = Array(prev), b = Array(now)
-        var common = 0
-        while common < a.count, common < b.count, a[common] == b[common] { common += 1 }
-        return Double(common) >= Double(min(a.count, b.count)) * 0.6
-    }
 
     /// Handle a poll where no element is focused. Rides through a transient miss
     /// (returns the last good snapshot) when a supported field in the same app was
