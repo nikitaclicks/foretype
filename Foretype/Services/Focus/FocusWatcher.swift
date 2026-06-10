@@ -209,14 +209,30 @@ final class FocusWatcher: FocusProviding {
     /// width (NOT height — editors grow vertically while staying the same field).
     /// Rounded to whole points to tolerate sub-pixel jitter. Returns nil when the
     /// element exposes no frame to anchor on.
-    private func focusSignature(of element: AXUIElement) -> String? {
+    ///
+    /// For Chromium **browsers** the enclosing web area's `AXURL` is appended as a
+    /// per-tab discriminator. Two tabs in one window put their composer at the same
+    /// role/subrole/position, so the structural part alone collides — the sequencer
+    /// would treat a tab switch as the same field and leak Tab A's surrounding
+    /// context (and session) into Tab B. The URL is stable while typing (it only
+    /// changes on navigation/tab switch), so this distinguishes tabs without
+    /// regressing the keystroke-churn collapse. Gated to browsers and bounded, so
+    /// native/Electron fields pay zero extra AX IPC on the fast-poll path (doc 03).
+    private func focusSignature(of element: AXUIElement, bundleID: String) -> String? {
         guard let frame = AccessibilityBridge.frame(element) else { return nil }
         let role = AccessibilityBridge.string(element, kAXRoleAttribute) ?? ""
         let subrole = AccessibilityBridge.string(element, kAXSubroleAttribute) ?? ""
         let x = Int(frame.origin.x.rounded())
         let y = Int(frame.origin.y.rounded())
         let w = Int(frame.size.width.rounded())
-        return "\(role)|\(subrole)|\(x)|\(y)|\(w)"
+        let base = "\(role)|\(subrole)|\(x)|\(y)|\(w)"
+
+        guard AccessibilityBridge.isChromiumBrowser(bundleID),
+              let webArea = AccessibilityBridge.enclosingWebArea(of: element),
+              let url = AccessibilityBridge.url(webArea) else {
+            return base
+        }
+        return "\(base)|\(url)"
     }
 
     private func poll() {
@@ -282,7 +298,7 @@ final class FocusWatcher: FocusProviding {
         }
 
         let elementHash = AccessibilityBridge.hash(focused)
-        let signature = focusSignature(of: focused)
+        let signature = focusSignature(of: focused, bundleID: bundleID)
 
         // Decide identity change. A different pid, or a different hash whose
         // structural signature ALSO differs, is a new field. A hash that churned

@@ -53,6 +53,29 @@ struct FocusIdentitySequencerTests {
         #expect(r.stableHash == 8)
     }
 
+    // Browser tab switch: the composer in two tabs of one window shares
+    // role|subrole|x|y|w, so only the per-tab AXURL that FocusWatcher appends to
+    // the signature distinguishes them. A different URL (churned hash) must read
+    // as a genuine field change so the coordinator clears Tab A's session/context.
+    @Test func tabSwitchChangesIdentity() {
+        let tabA = "AXTextArea||100|200|600|https://app.example.com/t/AAA"
+        let tabB = "AXTextArea||100|200|600|https://app.example.com/t/BBB"
+        let prior = Seq.Prior(hash: 7, pid: 42, signature: tabA)
+        let r = Seq.resolve(hash: 999, pid: 42, signature: tabB, prior: prior)
+        #expect(r.identityChanged)
+        #expect(r.stableHash == 999)
+    }
+
+    // Within one tab, the URL is stable while typing, so the keystroke-driven hash
+    // churn must still collapse to the prior identity (no per-keystroke teardown).
+    @Test func sameTabChurnStillCollapses() {
+        let tab = "AXTextArea||100|200|600|https://app.example.com/t/AAA"
+        let prior = Seq.Prior(hash: 7, pid: 42, signature: tab)
+        let r = Seq.resolve(hash: 999, pid: 42, signature: tab, prior: prior)
+        #expect(!r.identityChanged)
+        #expect(r.stableHash == 7)
+    }
+
     // Repeated churn converges: every poll keeps returning the same stable hash,
     // so the embedded identity never drifts.
     @Test func repeatedChurnStaysStable() {

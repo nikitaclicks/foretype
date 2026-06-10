@@ -315,6 +315,35 @@ struct CompletionCoordinatorTests {
         #expect(h.engine.generateCount == 0)
         #expect(h.overlay.showCount == 0)
     }
+
+    // MARK: 12. A new identity invalidates the surrounding-context cache
+    //
+    // Regression guard for the cross-tab context leak: the surrounding-context
+    // cache is keyed by FocusIdentity, so a genuine field change (e.g. a browser
+    // tab switch, which now produces a new identity because the per-tab URL is in
+    // the focus signature) must drop the cache. Otherwise Tab A's page context
+    // would be reused for a completion typed in Tab B.
+
+    @Test
+    func newIdentitySnapshotClearsSurroundingCache() async {
+        let h = makeHarness(debounceMs: 40)
+        let first = SnapshotFactory.supported(changeSequence: 1, precedingText: "hello ")
+        h.focus.emit(first)
+        await tick()
+
+        // Seed the cache as if Tab A's surrounding context had been gathered.
+        h.coordinator.surroundingContextCache = CompletionCoordinator.SurroundingContextCacheEntry(
+            identity: first.identity,
+            context: "tab A surrounding context",
+            capturedAt: h.coordinator.surroundingClock.now
+        )
+
+        // Focus jumps to a different field (new identity) — the tab-switch case.
+        h.focus.emit(SnapshotFactory.supported(changeSequence: 2, precedingText: "other "))
+        await tick()
+
+        #expect(h.coordinator.surroundingContextCache == nil)
+    }
 }
 
 private extension CompletionState {

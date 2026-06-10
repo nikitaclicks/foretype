@@ -80,7 +80,10 @@ enum AccessibilityBridge {
         "com.vivaldi.Vivaldi", "com.operasoftware.Opera",
     ]
 
-    private static func isChromiumBrowser(_ bundleID: String) -> Bool {
+    /// Whether `bundleID` is a Chromium-based browser. Drives both the
+    /// `AXEnhancedUserInterface` opt-in and the per-tab URL discriminator that
+    /// `FocusWatcher.focusSignature` folds into a browser field's identity.
+    static func isChromiumBrowser(_ bundleID: String) -> Bool {
         chromiumBrowserBundleIDs.contains(bundleID)
     }
 
@@ -332,6 +335,34 @@ enum AccessibilityBridge {
     /// which is exactly why the snapshot also carries a monotonic changeSequence.
     static func hash(_ element: AXUIElement) -> Int {
         Int(bitPattern: CFHash(element))
+    }
+
+    /// The nearest ancestor (or `element` itself) whose role is `AXWebArea`, found
+    /// by a bounded parent climb. The web area is the per-tab document root in a
+    /// browser, so its `AXURL` distinguishes two tabs whose composers share the
+    /// same role/subrole/position (see `FocusWatcher.focusSignature`). Bounded by
+    /// the same `maxClimbHops` budget the surrounding-context climb uses, so a
+    /// pathological tree can't make the poll path walk unbounded. nil if no web
+    /// area is reached within the budget.
+    static func enclosingWebArea(of element: AXUIElement) -> AXUIElement? {
+        var node: AXUIElement? = element
+        var hops = 0
+        while let current = node, hops < 20 {
+            if string(current, kAXRoleAttribute) == "AXWebArea" { return current }
+            node = self.element(current, kAXParentAttribute)
+            hops += 1
+        }
+        return nil
+    }
+
+    /// The `AXURL` of `element` as a string (a web area's document URL), or nil if
+    /// the attribute is missing / not a URL. The ApplicationServices `kAXURL*`
+    /// symbol imports awkwardly, so we use the raw `"AXURL"` key directly — matching
+    /// the marker-range / enhanced-AX keys elsewhere in this file.
+    static func url(_ element: AXUIElement, _ attribute: String = "AXURL") -> String? {
+        guard let raw = copyAttribute(element, attribute) else { return nil }
+        guard CFGetTypeID(raw) == CFURLGetTypeID() else { return nil }
+        return ((raw as! NSURL) as URL).absoluteString
     }
 
     // MARK: - Coordinate conversion (AX top-left/y-down → Cocoa bottom-left/y-up)
