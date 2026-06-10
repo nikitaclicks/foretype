@@ -47,13 +47,31 @@ struct CompletionTextNormalizerTests {
         #expect(out == " was a dragon")
     }
 
-    @Test func insertsSeparatorWhenModelStartsFreshWord() {
-        // Caret sits at the end of a complete word and the model returned a bare
-        // new word with no separator. We must insert the space so it reads
-        // "Hello world today", not "Helloworld today".
+    @Test func keepsModelSuppliedSeparatorForFreshWord() {
+        // Caret at the end of a complete word; under the "model owns spacing"
+        // contract the model supplies the leading space for a new word. We keep
+        // it (collapsed to one) so it reads "Hello world today".
         let req = request(preceding: "Hello")
-        let out = CompletionTextNormalizer.normalize("world today", request: req)
+        let out = CompletionTextNormalizer.normalize(" world today", request: req)
         #expect(out == " world today")
+    }
+
+    @Test func continuesMidWordWithoutFabricatingSpace() {
+        // The word-splitting bug: caret mid-word ("tes") and the model returned
+        // the continuation tail with no leading space. We must NOT inject a space
+        // — it inserts as "testing framework", not "tes ting framework".
+        let req = request(preceding: "tes")
+        let out = CompletionTextNormalizer.normalize("ting framework", request: req)
+        #expect(out == "ting framework")
+    }
+
+    @Test func fusesWhenModelOmitsLeadingSpaceForNewWord() {
+        // Accepted regression of "model owns spacing": if the model violates the
+        // contract by omitting the leading space on a genuine new word, we honor
+        // its output verbatim (no fabricated separator) rather than guess.
+        let req = request(preceding: "testing")
+        let out = CompletionTextNormalizer.normalize("autocomplete", request: req)
+        #expect(out == "autocomplete")
     }
 
     // MARK: - Quote stripping
@@ -144,10 +162,11 @@ struct CompletionTextNormalizerTests {
 
     // MARK: - Word-boundary reconciliation
 
-    @Test func insertsSeparatorAfterCompleteWord() {
-        // The "testingautocomplete" bug: complete word + bare new word → space.
+    @Test func keepsModelSeparatorAfterCompleteWord() {
+        // Complete word + new word: the model supplies the leading space, which we
+        // keep (collapsed to one) so it reads "testing autocomplete".
         let req = request(preceding: "testing")
-        let out = CompletionTextNormalizer.normalize("autocomplete", request: req)
+        let out = CompletionTextNormalizer.normalize(" autocomplete", request: req)
         #expect(out == " autocomplete")
     }
 
@@ -159,11 +178,11 @@ struct CompletionTextNormalizerTests {
         #expect(out == "utocomplete feature")
     }
 
-    @Test func insertsSeparatorForArticleThenNewWord() {
-        // Caret after the article "a"; model starts a different new word with no
-        // separator → insert the space ("testing a feature").
+    @Test func keepsModelSeparatorAfterArticle() {
+        // Caret after the article "a"; the model starts a new word and supplies the
+        // leading space, which we keep ("testing a feature").
         let req = request(preceding: "testing a")
-        let out = CompletionTextNormalizer.normalize("feature", request: req)
+        let out = CompletionTextNormalizer.normalize(" feature", request: req)
         #expect(out == " feature")
     }
 

@@ -168,13 +168,13 @@ enum CompletionTextNormalizer {
     /// Reconcile raw model output with the text before the caret so it inserts
     /// cleanly: strip any echoed in-progress word, and own the separator space.
     ///
-    /// The model is instructed (see `PromptBuilder`) to reproduce the in-progress
-    /// word at the caret before continuing, which lets us anchor spacing instead
-    /// of guessing it. Ordered steps:
+    /// The model owns the separator (see `PromptBuilder`): it continues the
+    /// in-progress word with NO leading space, and begins a new word WITH a single
+    /// leading space. The normalizer therefore never fabricates a separator — it
+    /// only strips echoes and normalizes the model-supplied leading space. Steps:
     /// 1. Full echo: if the output begins with the entire preceding text, drop it.
-    /// 2. In-progress word: if the caret sits after a word character, strip the
-    ///    repeated word; if the model instead started a fresh word with no
-    ///    separator, insert one.
+    /// 2. In-progress word: if the caret sits after a word character and the model
+    ///    repeated that word, strip the repeat. No separator is invented here.
     /// 3. Leading whitespace: drop it entirely when the caret already follows
     ///    whitespace, else collapse a leading run to a single space.
     private static func reconcile(_ text: String, preceding: String) -> String {
@@ -186,17 +186,13 @@ enum CompletionTextNormalizer {
             text = String(text.dropFirst(preceding.count))
         } else {
             // 2. In-progress word at the caret (the trailing non-boundary run).
+            //    If the model echoed it, keep only the rest. Otherwise leave the
+            //    text untouched — a continuation has no leading space, and a new
+            //    word carries its own leading space (handled by step 3). We never
+            //    fabricate a separator, which is what split words mid-typing.
             let partial = trailingWordRun(preceding)
-            if !partial.isEmpty {
-                if let remainder = dropMatchingPrefix(text, partial: partial) {
-                    // Model repeated the in-progress word — keep only the rest.
-                    text = remainder
-                } else if let first = text.first, !isBoundary(first) {
-                    // Model started a NEW word with no separator — insert one.
-                    text = " " + text
-                }
-                // Otherwise the output already leads with a separator: leave it
-                // for the whitespace normalization below.
+            if !partial.isEmpty, let remainder = dropMatchingPrefix(text, partial: partial) {
+                text = remainder
             }
         }
 

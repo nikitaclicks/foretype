@@ -106,11 +106,11 @@ enum PromptBuilder {
     ) -> String {
         var lines: [String] = []
         lines.append("You are an inline autocomplete engine. Continue the user's text naturally from the caret.")
-        lines.append("If the caret sits in the middle of a word, BEGIN your output by reproducing that whole in-progress word, then continue. If the caret is at a word boundary, begin with the next word.")
+        lines.append("SPACING: If the caret sits in the middle of a word, reproduce that whole in-progress word and continue it with NO leading space. If you are starting a NEW word, BEGIN your output with exactly one leading space.")
         lines.append("Examples (before caret -> your output):")
-        lines.append("  \"I am test\" -> \"testing autocomplete\"   (repeats the in-progress word \"test\", then completes it)")
-        lines.append("  \"I am testing \" -> \"autocomplete now\"    (caret after a space; just continue)")
-        lines.append("  \"Once upon a time there\" -> \"there was a dragon\"   (repeats the in-progress word \"there\")")
+        lines.append("  \"I am tes\" -> \"testing autocomplete\"   (continues the in-progress word \"tes\"; no leading space)")
+        lines.append("  \"I am testing\" -> \" autocomplete now\"    (new word; one leading space)")
+        lines.append("  \"I am testing \" -> \"autocomplete now\"    (caret already after a space; no extra leading space)")
         lines.append("Return ONLY the continuation text — no quotes, no labels, no commentary, no code fences.")
         lines.append("Target length: \(lengthInstruction). Stop at a natural boundary.")
         lines.append("Application: \(appName).")
