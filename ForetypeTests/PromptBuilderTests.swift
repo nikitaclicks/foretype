@@ -21,7 +21,7 @@ struct PromptBuilderTests {
             precedingText: preceding,
             trailingText: trailing,
             selection: NSRange(location: 0, length: 0),
-            caret: CaretGeometry(rect: .zero, quality: .exact, observedCharWidth: nil, font: nil),
+            caret: CaretGeometry(rect: .zero, quality: .exact, observedCharWidth: nil, font: nil, color: nil),
             isSecure: false,
             capability: .supported
         )

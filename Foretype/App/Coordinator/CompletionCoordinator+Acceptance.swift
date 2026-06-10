@@ -84,7 +84,8 @@ extension CompletionCoordinator {
             caretRect: rect,
             fieldRect: nil,
             quality: caret.quality,
-            font: caret.font
+            font: caret.font,
+            color: caret.color
         )
     }
 }

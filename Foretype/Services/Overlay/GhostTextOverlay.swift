@@ -95,7 +95,7 @@ final class GhostTextOverlay: OverlayPresenting {
     /// Lay out the panel for the given text + geometry and push fresh content
     /// into the reused hosting view.
     private func render(text: String, geometry: OverlayGeometry) {
-        let color = resolvedColor()
+        let color = resolvedColor(geometry: geometry)
         let caretRect = geometry.caretRect
 
         // Resolve the ghost font from the host field when AX exposed it (family +
@@ -255,11 +255,22 @@ final class GhostTextOverlay: OverlayPresenting {
         return min(upper, max(lower, raw))
     }
 
-    /// Resolve the configured ghost-text color, defaulting to secondary label.
-    private func resolvedColor() -> Color {
+    /// Resolve the ghost-text color so the suggestion stays visible against the
+    /// host background. A user-configured override wins; otherwise we adopt the
+    /// host field's own text color (read from AX) dimmed to a placeholder, since
+    /// it is guaranteed to contrast the host background; falling back to the
+    /// system secondary label color when AX exposes no color (doc 08).
+    private func resolvedColor(geometry: OverlayGeometry) -> Color {
         if let hex = settings.current.ghostTextColorHex,
            let nsColor = NSColor(hex: hex) {
             return Color(nsColor)
+        }
+        if let host = geometry.color {
+            // Dim to ~50% so the suggestion reads as a ghost, not committed text.
+            // The transparent panel composites this over the host background, so
+            // dimmed-black-on-light and dimmed-white-on-dark both stay legible.
+            return Color(.sRGB, red: host.red, green: host.green,
+                         blue: host.blue, opacity: host.alpha * 0.5)
         }
         return Color(nsColor: .secondaryLabelColor)
     }

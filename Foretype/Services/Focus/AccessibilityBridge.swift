@@ -255,15 +255,19 @@ enum AccessibilityBridge {
         return (raw as! CFString) as String
     }
 
-    // MARK: - Parameterized attribute: font for range
+    // MARK: - Parameterized attribute: font + color for range
 
-    /// The font applied at a sub-range, read from `AXAttributedStringForRange`'s
-    /// `AXFont` attribute. Lets the overlay render ghost text in the host field's
-    /// actual font (family + point size) instead of guessing from caret height
-    /// (doc 08). Returns `(name, pointSize)`; `name` may be nil if only a size is
-    /// exposed. nil when the host doesn't support attributed strings (common for
-    /// some web fields) — callers fall back to the caret-height heuristic.
-    static func fontForRange(_ element: AXUIElement, location: Int, length: Int) -> (name: String?, pointSize: CGFloat)? {
+    /// The font and foreground color applied at a sub-range, read from a single
+    /// `AXAttributedStringForRange` call (`AXFont` + `AXForegroundColor`
+    /// attributes). The font lets the overlay match the host field's family +
+    /// point size; the color lets it render the ghost text in a hue that
+    /// contrasts the host background instead of tracking the system appearance
+    /// (doc 08). Returns nil when the host doesn't support attributed strings
+    /// (common for some web fields). Either sub-value may individually be nil
+    /// when only one of the two attributes is exposed.
+    static func textAttributesForRange(
+        _ element: AXUIElement, location: Int, length: Int
+    ) -> (font: (name: String?, pointSize: CGFloat)?, color: CaretColor?)? {
         guard location >= 0, length > 0 else { return nil }
         var cfRange = CFRange(location: location, length: length)
         guard let rangeValue = AXValueCreate(.cfRange, &cfRange) else { return nil }
@@ -280,10 +284,18 @@ enum AccessibilityBridge {
         let attributed = raw as! CFAttributedString
         guard CFAttributedStringGetLength(attributed) > 0 else { return nil }
 
-        // The AXFont attribute value is a dictionary keyed by AXFontName /
-        // AXFontSize. The ApplicationServices symbol constants import as
-        // `Unmanaged<CFString>`, so we use the raw key strings directly — matching
-        // the marker-range / enhanced-AX keys elsewhere in this file.
+        let font = fontAttribute(attributed)
+        let color = foregroundColorAttribute(attributed)
+        guard font != nil || color != nil else { return nil }
+        return (font: font, color: color)
+    }
+
+    /// Extract `(name, pointSize)` from the attributed string's `AXFont`
+    /// dictionary (keyed by AXFontName / AXFontSize). The ApplicationServices
+    /// symbol constants import as `Unmanaged<CFString>`, so we use the raw key
+    /// strings directly — matching the marker-range / enhanced-AX keys elsewhere
+    /// in this file.
+    private static func fontAttribute(_ attributed: CFAttributedString) -> (name: String?, pointSize: CGFloat)? {
         guard let fontRaw = CFAttributedStringGetAttribute(attributed, 0, "AXFont" as CFString, nil),
               CFGetTypeID(fontRaw) == CFDictionaryGetTypeID() else { return nil }
         let dict = fontRaw as! CFDictionary as NSDictionary
@@ -296,6 +308,22 @@ enum AccessibilityBridge {
         }
         guard let size = pointSize, size.isFinite, size > 0 else { return nil }
         return (name: name, pointSize: size)
+    }
+
+    /// Extract the host text color from the attributed string's
+    /// `AXForegroundColor` attribute (a `CGColor`), normalized to sRGB
+    /// components. nil when the attribute is absent or not convertible.
+    private static func foregroundColorAttribute(_ attributed: CFAttributedString) -> CaretColor? {
+        guard let colorRaw = CFAttributedStringGetAttribute(attributed, 0, "AXForegroundColor" as CFString, nil),
+              CFGetTypeID(colorRaw) == CGColor.typeID else { return nil }
+        let cgColor = colorRaw as! CGColor
+        guard let nsColor = NSColor(cgColor: cgColor)?.usingColorSpace(.sRGB) else { return nil }
+        return CaretColor(
+            red: nsColor.redComponent,
+            green: nsColor.greenComponent,
+            blue: nsColor.blueComponent,
+            alpha: nsColor.alphaComponent
+        )
     }
 
     // MARK: - Identity

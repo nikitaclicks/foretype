@@ -28,6 +28,17 @@ struct CaretFont: Equatable, Sendable {
     let pointSize: CGFloat
 }
 
+/// The host field's foreground text color at the caret, read from Accessibility
+/// so the overlay can render the suggestion in a hue that contrasts the host
+/// background rather than tracking the system appearance (doc 08). Stored as
+/// sRGB components; nil on `CaretGeometry` when AX exposes no color.
+struct CaretColor: Equatable, Sendable {
+    let red: CGFloat
+    let green: CGFloat
+    let blue: CGFloat
+    let alpha: CGFloat
+}
+
 /// The caret's on-screen rectangle (Cocoa screen coordinates) plus a quality
 /// rating, an optional observed character width (used for caret prediction
 /// during insertion, doc 08), and the host field's font when AX exposes it.
@@ -36,6 +47,7 @@ struct CaretGeometry: Equatable, Sendable {
     let quality: CaretQuality
     let observedCharWidth: CGFloat?
     let font: CaretFont?
+    let color: CaretColor?
 }
 
 /// Whether a focused field can be completed against.

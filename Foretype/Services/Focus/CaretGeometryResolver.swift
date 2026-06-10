@@ -14,16 +14,17 @@ enum CaretGeometryResolver {
     static func resolve(element: AXUIElement, selection: NSRange) -> CaretGeometry? {
         let caret = max(0, selection.location)
 
-        // The host field's font at the caret, so the overlay can match family +
-        // point size instead of guessing from caret height (doc 08). Best-effort:
-        // nil for hosts without attributed-string support (some web fields).
-        let font = resolveFont(element: element, caret: caret)
+        // The host field's font + foreground color at the caret, so the overlay
+        // can match family + point size (doc 08) and render in a hue that
+        // contrasts the host background. Best-effort: nil for hosts without
+        // attributed-string support (some web fields).
+        let (font, color) = resolveHostAttributes(element: element, caret: caret)
 
         // Step 1: zero-length bounds at the caret → exact.
         if let axRect = AccessibilityBridge.boundsForRange(element, location: caret, length: 0),
            isUsableCaretRect(axRect),
            let cocoa = AccessibilityBridge.axRectToCocoa(axRect) {
-            return CaretGeometry(rect: normalizedCaretRect(cocoa), quality: .exact, observedCharWidth: nil, font: font)
+            return CaretGeometry(rect: normalizedCaretRect(cocoa), quality: .exact, observedCharWidth: nil, font: font, color: color)
         }
 
         // Step 2: web text-marker bounds → derived. Chromium/WebKit hosts (Chrome,
@@ -34,7 +35,7 @@ enum CaretGeometryResolver {
         if let axRect = AccessibilityBridge.boundsForSelectedTextMarkerRange(of: element),
            isUsableCaretRect(axRect),
            let cocoa = AccessibilityBridge.axRectToCocoa(axRect) {
-            return CaretGeometry(rect: normalizedCaretRect(cocoa), quality: .derived, observedCharWidth: nil, font: font)
+            return CaretGeometry(rect: normalizedCaretRect(cocoa), quality: .derived, observedCharWidth: nil, font: font, color: color)
         }
 
         // Step 3: character-before, shifted to its trailing edge → derived.
@@ -53,7 +54,8 @@ enum CaretGeometryResolver {
                     rect: normalizedCaretRect(cocoa),
                     quality: .derived,
                     observedCharWidth: axRect.width > 0 ? axRect.width : nil,
-                    font: font
+                    font: font,
+                    color: color
                 )
             }
         }
@@ -63,7 +65,7 @@ enum CaretGeometryResolver {
         // both NSRange and collapsed text-marker bounds, but DO expose real frames
         // on the rendered AXStaticText runs (often nested several groups deep). We
         // locate the run containing the caret offset and interpolate within it.
-        if let derived = proportionalWithinRuns(element: element, caret: caret, font: font) {
+        if let derived = proportionalWithinRuns(element: element, caret: caret, font: font, color: color) {
             return derived
         }
 
@@ -80,25 +82,34 @@ enum CaretGeometryResolver {
                 width: 1,
                 height: min(cocoa.height, 24)
             )
-            return CaretGeometry(rect: caretRect, quality: .estimated, observedCharWidth: nil, font: font)
+            return CaretGeometry(rect: caretRect, quality: .estimated, observedCharWidth: nil, font: font, color: color)
         }
 
         return nil
     }
 
-    // MARK: - Font
+    // MARK: - Font + color
 
-    /// Read the host font at the caret, probing the glyph just before the caret
-    /// first (it shares the typed run), then the glyph at the caret, then the
-    /// field start. Returns nil when no probe yields a font.
-    private static func resolveFont(element: AXUIElement, caret: Int) -> CaretFont? {
+    /// Read the host font and foreground color at the caret, probing the glyph
+    /// just before the caret first (it shares the typed run), then the glyph at
+    /// the caret, then the field start. Returns the first font found and the
+    /// first color found (independently — a probe may yield one but not the
+    /// other); both nil when no probe yields anything.
+    private static func resolveHostAttributes(element: AXUIElement, caret: Int) -> (CaretFont?, CaretColor?) {
         let probes: [(Int, Int)] = caret > 0 ? [(caret - 1, 1), (caret, 1), (0, 1)] : [(caret, 1), (0, 1)]
+        var font: CaretFont?
+        var color: CaretColor?
         for (loc, len) in probes {
-            if let f = AccessibilityBridge.fontForRange(element, location: loc, length: len) {
-                return CaretFont(name: f.name, pointSize: f.pointSize)
+            guard font == nil || color == nil else { break }
+            guard let attrs = AccessibilityBridge.textAttributesForRange(element, location: loc, length: len) else { continue }
+            if font == nil, let f = attrs.font {
+                font = CaretFont(name: f.name, pointSize: f.pointSize)
+            }
+            if color == nil, let c = attrs.color {
+                color = c
             }
         }
-        return nil
+        return (font, color)
     }
 
     // MARK: - Step 4 helper
@@ -108,7 +119,7 @@ enum CaretGeometryResolver {
     /// within that run's real frame. Quality `.derived`. Bounded by a node budget
     /// and a depth cap so a huge document can't stall a poll (we "get out of the
     /// way" — return nil → estimated — rather than walk an unbounded tree).
-    private static func proportionalWithinRuns(element: AXUIElement, caret: Int, font: CaretFont?) -> CaretGeometry? {
+    private static func proportionalWithinRuns(element: AXUIElement, caret: Int, font: CaretFont?, color: CaretColor?) -> CaretGeometry? {
         var consumed = 0
         var budget = 1500
         var result: CaretGeometry?
@@ -140,7 +151,8 @@ enum CaretGeometryResolver {
                                 rect: normalizedCaretRect(cocoa),
                                 quality: .derived,
                                 observedCharWidth: charWidth > 0 ? charWidth : nil,
-                                font: font
+                                font: font,
+                                color: color
                             )
                             return
                         }
