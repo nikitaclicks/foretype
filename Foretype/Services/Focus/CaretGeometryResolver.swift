@@ -11,7 +11,7 @@ enum CaretGeometryResolver {
     /// Resolve caret geometry for `element` given its `selection`. Returns nil
     /// when no rect could be obtained at all. All returned rects are in Cocoa
     /// (bottom-left, y-up) screen coordinates and validated to land on a screen.
-    static func resolve(element: AXUIElement, selection: NSRange) -> CaretGeometry? {
+    static func resolve(element: AXUIElement, selection: NSRange, fieldRect: CGRect? = nil) -> CaretGeometry? {
         let caret = max(0, selection.location)
 
         // The host field's font + foreground color at the caret, so the overlay
@@ -22,9 +22,9 @@ enum CaretGeometryResolver {
 
         // Step 1: zero-length bounds at the caret → exact.
         if let axRect = AccessibilityBridge.boundsForRange(element, location: caret, length: 0),
-           isUsableCaretRect(axRect),
+           isUsableCaretRect(axRect), isCollapsedCaretWidth(axRect),
            let cocoa = AccessibilityBridge.axRectToCocoa(axRect) {
-            return CaretGeometry(rect: normalizedCaretRect(cocoa), quality: .exact, observedCharWidth: nil, font: font, color: color)
+            return CaretGeometry(rect: clampToField(normalizedCaretRect(cocoa), field: fieldRect), quality: .exact, observedCharWidth: nil, font: font, color: color)
         }
 
         // Step 2: web text-marker bounds → derived. Chromium/WebKit hosts (Chrome,
@@ -33,9 +33,9 @@ enum CaretGeometryResolver {
         // expose the caret reliably through `AXSelectedTextMarkerRange` +
         // `AXBoundsForTextMarkerRange`. This is the spec's step 2 (doc 03).
         if let axRect = AccessibilityBridge.boundsForSelectedTextMarkerRange(of: element),
-           isUsableCaretRect(axRect),
+           isUsableCaretRect(axRect), isCollapsedCaretWidth(axRect),
            let cocoa = AccessibilityBridge.axRectToCocoa(axRect) {
-            return CaretGeometry(rect: normalizedCaretRect(cocoa), quality: .derived, observedCharWidth: nil, font: font, color: color)
+            return CaretGeometry(rect: clampToField(normalizedCaretRect(cocoa), field: fieldRect), quality: .derived, observedCharWidth: nil, font: font, color: color)
         }
 
         // Step 3: character-before, shifted to its trailing edge → derived.
@@ -51,7 +51,7 @@ enum CaretGeometryResolver {
             )
             if let cocoa = AccessibilityBridge.axRectToCocoa(shifted) {
                 return CaretGeometry(
-                    rect: normalizedCaretRect(cocoa),
+                    rect: clampToField(normalizedCaretRect(cocoa), field: fieldRect),
                     quality: .derived,
                     observedCharWidth: axRect.width > 0 ? axRect.width : nil,
                     font: font,
@@ -65,7 +65,7 @@ enum CaretGeometryResolver {
         // both NSRange and collapsed text-marker bounds, but DO expose real frames
         // on the rendered AXStaticText runs (often nested several groups deep). We
         // locate the run containing the caret offset and interpolate within it.
-        if let derived = proportionalWithinRuns(element: element, caret: caret, font: font, color: color) {
+        if let derived = proportionalWithinRuns(element: element, caret: caret, font: font, color: color, fieldRect: fieldRect) {
             return derived
         }
 
@@ -119,7 +119,7 @@ enum CaretGeometryResolver {
     /// within that run's real frame. Quality `.derived`. Bounded by a node budget
     /// and a depth cap so a huge document can't stall a poll (we "get out of the
     /// way" — return nil → estimated — rather than walk an unbounded tree).
-    private static func proportionalWithinRuns(element: AXUIElement, caret: Int, font: CaretFont?, color: CaretColor?) -> CaretGeometry? {
+    private static func proportionalWithinRuns(element: AXUIElement, caret: Int, font: CaretFont?, color: CaretColor?, fieldRect: CGRect?) -> CaretGeometry? {
         var consumed = 0
         var budget = 1500
         var result: CaretGeometry?
@@ -148,7 +148,7 @@ enum CaretGeometryResolver {
                         )
                         if let cocoa = AccessibilityBridge.axRectToCocoa(caretAXRect) {
                             result = CaretGeometry(
-                                rect: normalizedCaretRect(cocoa),
+                                rect: clampToField(normalizedCaretRect(cocoa), field: fieldRect),
                                 quality: .derived,
                                 observedCharWidth: charWidth > 0 ? charWidth : nil,
                                 font: font,
@@ -179,6 +179,42 @@ enum CaretGeometryResolver {
         guard rect.height > 0.5, rect.height < 4000 else { return false }
         guard abs(rect.origin.x) < 100_000, abs(rect.origin.y) < 100_000 else { return false }
         return true
+    }
+
+    /// A collapsed caret (zero-length selection / text-marker range) is a near-zero
+    /// -width point. Chromium hosts under re-layout sometimes return the bounds of a
+    /// whole line/selection/block instead — a rect hundreds of px wide, frequently at
+    /// a transiently-wrong Y (seen in ClickUp's chat composers as `w≈1122` blocks).
+    /// Such a rect is not a caret: reject it so a cleaner step (or the next poll)
+    /// wins rather than anchoring the overlay to a bogus block.
+    private static func isCollapsedCaretWidth(_ rect: CGRect) -> Bool {
+        rect.width <= 24
+    }
+
+    /// Sanity-bound a caret rect against the field's own frame. The element frame
+    /// (AXPosition/AXSize) is far more stable than per-glyph text bounds: some
+    /// Chromium hosts (notably ClickUp's portaled chat side-panel composer) return
+    /// wildly unstable Y for `AXBoundsForTextMarkerRange`/`AXBoundsForRange`,
+    /// jumping between the real caret line and random screen positions for the same
+    /// caret offset — which lands the overlay far from the field. A real caret
+    /// always lies within its field's box (the field frame grows to enclose all its
+    /// text), so when the resolved caret's vertical center falls outside that box
+    /// (beyond a small descender/leading slack) the Y is bogus: re-anchor onto the
+    /// field's top text line, preserving the caret height and x (clamped into the
+    /// field). When no field rect is available this is a no-op.
+    private static func clampToField(_ caret: CGRect, field: CGRect?) -> CGRect {
+        guard let field, field.height > 0 else { return caret }
+        let slack: CGFloat = 6   // descenders, line leading, rounding
+        if caret.midY >= field.minY - slack, caret.midY <= field.maxY + slack {
+            return caret
+        }
+        let h = min(caret.height, field.height)
+        return CGRect(
+            x: min(max(caret.minX, field.minX), field.maxX),
+            y: field.maxY - h,            // top text line of the field (largest cocoa y)
+            width: caret.width,
+            height: h
+        )
     }
 
     /// Ensure a usable, non-zero-width caret rect for positioning the overlay.
