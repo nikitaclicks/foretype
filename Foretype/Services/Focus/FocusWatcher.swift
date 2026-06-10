@@ -60,14 +60,23 @@ final class FocusWatcher: FocusProviding {
     /// used to recognize the same logical field across `CFHash` churn (doc 03).
     private var lastSignature: String?
     /// Consecutive polls that resolved to no usable field while a supported field
-    /// was still current. Lets us ride through Chromium's focus "bounce" (the
-    /// system focused element flip-flops between the editable node and its web
-    /// area on alternating polls) instead of tearing the session down each tick.
+    /// was still current. Lets us ride through transient AX glitches (Chromium's
+    /// focus "bounce" between the editable node and its web area, or caret geometry
+    /// briefly dropping to estimated/nil) instead of tearing the session down.
+    /// Kept for diagnostics; the ride-through decision is now time-based.
     private var missStreak = 0
-    /// How many consecutive unusable polls to tolerate before accepting focus
-    /// loss (≈ ticks × pollInterval). The bounce never misses twice in a row, so a
-    /// small window absorbs it while a genuine focus change still lands promptly.
-    private let focusGraceTicks = 4
+    /// When the current miss streak began. Opened on the first unusable poll while
+    /// a supported field is current, cleared on recovery (or once the hold window
+    /// is exceeded). `nil` means no streak in progress.
+    private var missStreakStart: ContinuousClock.Instant?
+    /// How long to ride through unusable polls before accepting focus loss. A
+    /// *time* box, not a tick count: the old 4-tick (~200ms) window assumed "the
+    /// bounce never misses twice in a row," but real Chromium web fields (notably
+    /// GitHub's comment composer) glitch for 5–8 consecutive polls (~300–500ms) —
+    /// long enough to exhaust 4 ticks, tear down an on-screen suggestion, and kill
+    /// Tab acceptance. ~700ms absorbs those sub-second glitches with margin while a
+    /// genuine focus change (different field) still lands promptly via identity.
+    private let focusHoldWindow: Duration = .milliseconds(700)
     /// Apps we've already opted into exposing their full AX tree, so we set
     /// `AXManualAccessibility` once per app rather than on every poll. Pruned when an
     /// app terminates (see `terminationObserver`) so it can't grow unbounded across a
@@ -306,23 +315,64 @@ final class FocusWatcher: FocusProviding {
         }()
         if candidate.capability == .supported || isBlocked {
             commitIdentity(seq: seq, pid: pid, signature: signature)
-            missStreak = 0
+            resetMissStreak()
             return candidate
         }
 
-        // Unsupported read (e.g. Chromium focus bounce to the web area). If we just
-        // had a supported field in this same app, ride through it: re-serve the
-        // last good snapshot without disturbing identity state.
+        // Unsupported read (Chromium focus bounce to the web area, or caret geometry
+        // briefly dropping to estimated/nil). If we just had a supported field in
+        // this same app, ride through it for up to `focusHoldWindow` — re-serving the
+        // last good snapshot without disturbing identity state — so a sub-second AX
+        // glitch on a web field doesn't tear the session down (which would vanish an
+        // on-screen suggestion and kill Tab acceptance).
         if let current, current.capability == .supported,
-           current.identity.pid == pid, missStreak < focusGraceTicks {
+           current.identity.pid == pid, withinHoldWindow() {
             missStreak += 1
+            caretDiag("flip: rideThrough missStreak=\(missStreak) cap=\(candidate.capability)")
             return current
         }
 
-        // Grace exhausted (or a different app): accept the unsupported state.
+        // Hold window exceeded (or a different app): accept the unsupported state.
+        if let current, current.capability == .supported, current.identity.pid == pid {
+            caretDiag("flip: HOLD EXCEEDED → unsupported (teardown) cap=\(candidate.capability)")
+        }
         commitIdentity(seq: seq, pid: pid, signature: signature)
-        missStreak = 0
+        resetMissStreak()
         return candidate
+    }
+
+    /// Whether we're still inside the ride-through hold window. Opens the window
+    /// (records the start instant) on the first miss of a streak; subsequent calls
+    /// check elapsed time against `focusHoldWindow`. Reset via `resetMissStreak()`.
+    private func withinHoldWindow() -> Bool {
+        let now = ContinuousClock().now
+        guard let start = missStreakStart else {
+            missStreakStart = now
+            return true
+        }
+        return start.duration(to: now) < focusHoldWindow
+    }
+
+    /// Clear miss-streak bookkeeping on recovery or after the hold window lapses.
+    private func resetMissStreak() {
+        missStreak = 0
+        missStreakStart = nil
+    }
+
+    /// Append a line to `/tmp/foretype-caretdiag.log`, gated on the `caretDiag`
+    /// UserDefaults flag — correlates capability flips with `CaretGeometryResolver`'s
+    /// per-step output so we can see whether a degraded caret was absorbed by the
+    /// hold window or exhausted it into a session teardown. Kept (gated off) for
+    /// diagnosing future browser-AX regressions.
+    private func caretDiag(_ message: String) {
+        guard UserDefaults.standard.bool(forKey: "caretDiag") else { return }
+        guard let data = (message + "\n").data(using: .utf8) else { return }
+        let url = URL(fileURLWithPath: "/tmp/foretype-caretdiag.log")
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile(); handle.write(data); try? handle.close()
+        } else {
+            try? data.write(to: url)
+        }
     }
 
     /// Build the `FocusSnapshot` for a focused element, without committing any
@@ -362,7 +412,27 @@ final class FocusWatcher: FocusProviding {
 
         let fieldRect = AccessibilityBridge.frame(resolution.element)
             .flatMap { AccessibilityBridge.axRectToCocoa($0) }
-        let caret = CaretGeometryResolver.resolve(element: resolution.element, selection: resolution.selection, fieldRect: fieldRect)
+        let resolved = CaretGeometryResolver.resolve(element: resolution.element, selection: resolution.selection, fieldRect: fieldRect)
+
+        // Caret-geometry flicker recovery. On Chrome web fields the caret rect
+        // intermittently drops to estimated/nil for stretches >700ms while the
+        // element, text and selection are all perfectly intact (observed on
+        // GitHub's composer). Flipping unsupported there tears the session down for
+        // a purely cosmetic blip. Instead, as long as it's the SAME field and the
+        // selection hasn't moved, reuse the last good caret: the overlay simply
+        // holds its position until real geometry returns. A genuine caret move
+        // changes the selection (and thus the text split), so this can't pin the
+        // overlay to a stale spot — that path falls through to a fresh resolve.
+        let caret: CaretGeometry?
+        if let resolved, resolved.quality != .estimated {
+            caret = resolved
+        } else if let current, current.capability == .supported, current.identity == identity,
+                  current.selection == resolution.selection, let lastGood = current.caret {
+            caret = lastGood
+            caretDiag("flip: reuse last-good caret (geometry flicker) sel=\(resolution.selection)")
+        } else {
+            caret = resolved
+        }
 
         // Correctness-or-nothing: only a caret of at least `derived` quality makes
         // a field supported (doc 03). Web hosts reach this via the text-marker path.
@@ -394,11 +464,11 @@ final class FocusWatcher: FocusProviding {
     /// current, else returns nil so `poll()` clears focus.
     private func rideThroughMiss(pid: pid_t) -> FocusSnapshot? {
         if let current, current.capability == .supported,
-           current.identity.pid == pid, missStreak < focusGraceTicks {
+           current.identity.pid == pid, withinHoldWindow() {
             missStreak += 1
             return current
         }
-        missStreak = 0
+        resetMissStreak()
         return nil
     }
 

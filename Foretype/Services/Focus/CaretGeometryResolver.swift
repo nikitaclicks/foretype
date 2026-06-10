@@ -24,7 +24,7 @@ enum CaretGeometryResolver {
         if let axRect = AccessibilityBridge.boundsForRange(element, location: caret, length: 0),
            isUsableCaretRect(axRect), isCollapsedCaretWidth(axRect),
            let cocoa = AccessibilityBridge.axRectToCocoa(axRect) {
-            return CaretGeometry(rect: clampToField(normalizedCaretRect(cocoa), field: fieldRect), quality: .exact, observedCharWidth: nil, font: font, color: color)
+            return logged("1-exact", CaretGeometry(rect: clampToField(normalizedCaretRect(cocoa), field: fieldRect), quality: .exact, observedCharWidth: nil, font: font, color: color), element: element, caret: caret)
         }
 
         // Step 2: web text-marker bounds → derived. Chromium/WebKit hosts (Chrome,
@@ -35,7 +35,7 @@ enum CaretGeometryResolver {
         if let axRect = AccessibilityBridge.boundsForSelectedTextMarkerRange(of: element),
            isUsableCaretRect(axRect), isCollapsedCaretWidth(axRect),
            let cocoa = AccessibilityBridge.axRectToCocoa(axRect) {
-            return CaretGeometry(rect: clampToField(normalizedCaretRect(cocoa), field: fieldRect), quality: .derived, observedCharWidth: nil, font: font, color: color)
+            return logged("2-marker", CaretGeometry(rect: clampToField(normalizedCaretRect(cocoa), field: fieldRect), quality: .derived, observedCharWidth: nil, font: font, color: color), element: element, caret: caret)
         }
 
         // Step 3: character-before, shifted to its trailing edge → derived.
@@ -50,13 +50,13 @@ enum CaretGeometryResolver {
                 height: axRect.height
             )
             if let cocoa = AccessibilityBridge.axRectToCocoa(shifted) {
-                return CaretGeometry(
+                return logged("3-charbefore", CaretGeometry(
                     rect: clampToField(normalizedCaretRect(cocoa), field: fieldRect),
                     quality: .derived,
                     observedCharWidth: axRect.width > 0 ? axRect.width : nil,
                     font: font,
                     color: color
-                )
+                ), element: element, caret: caret)
             }
         }
 
@@ -66,7 +66,7 @@ enum CaretGeometryResolver {
         // on the rendered AXStaticText runs (often nested several groups deep). We
         // locate the run containing the caret offset and interpolate within it.
         if let derived = proportionalWithinRuns(element: element, caret: caret, font: font, color: color, fieldRect: fieldRect) {
-            return derived
+            return logged("4-runs", derived, element: element, caret: caret)
         }
 
         // Step 5: element-frame fallback → estimated.
@@ -82,10 +82,10 @@ enum CaretGeometryResolver {
                 width: 1,
                 height: min(cocoa.height, 24)
             )
-            return CaretGeometry(rect: caretRect, quality: .estimated, observedCharWidth: nil, font: font, color: color)
+            return logged("5-estimated", CaretGeometry(rect: caretRect, quality: .estimated, observedCharWidth: nil, font: font, color: color), element: element, caret: caret)
         }
 
-        return nil
+        return logged("nil", nil, element: element, caret: caret)
     }
 
     // MARK: - Font + color
@@ -223,5 +223,44 @@ enum CaretGeometryResolver {
         if r.width < 1 { r.size.width = 1 }
         if r.height < 1 { r.size.height = 1 }
         return r
+    }
+
+    // MARK: - Diagnostics (caretDiag)
+
+    /// Last winning step and when we logged it, so the 20 Hz poll doesn't flood the
+    /// file: we emit on every *change* of winning step and otherwise at most ~2/s.
+    private static var diagLastStep: String?
+    private static var diagLastLog: ContinuousClock.Instant?
+
+    /// Pass-through that records which strategy won (and the rect/quality it
+    /// produced) before returning it. Gated on the `caretDiag` UserDefaults flag
+    /// (`defaults write com.foretype.Foretype caretDiag -bool YES`), so a normal run
+    /// pays only the unchanged-step early-out. Kept for diagnosing future browser-AX
+    /// regressions — e.g. when a Chrome update degrades a web host's caret geometry.
+    private static func logged(_ step: String, _ geom: CaretGeometry?, element: AXUIElement, caret: Int) -> CaretGeometry? {
+        guard UserDefaults.standard.bool(forKey: "caretDiag") else { return geom }
+        let now = ContinuousClock().now
+        if step == diagLastStep, let last = diagLastLog, last.duration(to: now) < .milliseconds(500) {
+            return geom
+        }
+        diagLastStep = step
+        diagLastLog = now
+
+        let role = AccessibilityBridge.string(element, kAXRoleAttribute) ?? "?"
+        let subrole = AccessibilityBridge.string(element, kAXSubroleAttribute) ?? "-"
+        let rectStr: String = geom.map {
+            String(format: "x=%.0f y=%.0f w=%.1f h=%.1f", $0.rect.origin.x, $0.rect.origin.y, $0.rect.width, $0.rect.height)
+        } ?? "nil"
+        let quality = geom.map { "\($0.quality)" } ?? "none"
+        let line = String(format: "step=%@ quality=%@ caret=%d role=%@|%@ rect=%@\n",
+                          step, quality, caret, role, subrole, rectStr)
+        guard let data = line.data(using: .utf8) else { return geom }
+        let url = URL(fileURLWithPath: "/tmp/foretype-caretdiag.log")
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile(); handle.write(data); try? handle.close()
+        } else {
+            try? data.write(to: url)
+        }
+        return geom
     }
 }
