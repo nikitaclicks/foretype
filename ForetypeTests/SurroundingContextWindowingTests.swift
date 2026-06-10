@@ -63,6 +63,181 @@ struct SurroundingContextWindowingTests {
                 == SurroundingContextWindowing.assemble(fragments: fragments))
     }
 
+    // MARK: - assemble(scored:) — proximity-biased selection
+
+    /// Build a `ScoredFragment` tersely for tests.
+    private static func sf(_ text: String, order: Int, distance: CGFloat, pinned: Bool = false)
+        -> SurroundingContextWindowing.ScoredFragment {
+        .init(text: text, order: order, distance: distance, pinned: pinned)
+    }
+
+    @Test func assembleScoredEmptyStaysEmpty() {
+        #expect(SurroundingContextWindowing.assemble(scored: []) == "")
+        #expect(SurroundingContextWindowing.assemble(scored: [
+            Self.sf("", order: 0, distance: 0),
+            Self.sf("   ", order: 1, distance: 1),
+        ]) == "")
+    }
+
+    @Test func assembleScoredSelectsNearestWhenOverBudget() {
+        // Each fragment is at the per-fragment cap; far more than fit in the
+        // budget. Distance ASCENDS with document order here, so the nearest
+        // (order 0, smallest distance) must survive and the farthest must not —
+        // the inverse of the legacy head-retention contract would be the same
+        // here, so make the NEAREST be a LATE document fragment below.
+        let frags = (0..<100).map { i in
+            Self.sf("frag\(i)-" + String(repeating: "x", count: 200), order: i, distance: CGFloat(i))
+        }
+        let result = SurroundingContextWindowing.assemble(scored: frags)
+        #expect(result.count <= SurroundingContextWindowing.totalCharBudget)
+        #expect(result.contains("frag0-"))     // nearest (distance 0) kept
+        #expect(!result.contains("frag99-"))   // farthest dropped
+    }
+
+    @Test func assembleScoredKeepsNearWhenNearIsLateInDocument() {
+        // The crux of the fix: the NEAREST fragment is LAST in document order
+        // (composer at the bottom). Legacy head-retention would drop it; proximity
+        // selection must keep it and evict the distant early fragments.
+        let frags = (0..<100).map { i in
+            // distance decreases as order increases → last fragment is nearest.
+            Self.sf("doc\(i)-" + String(repeating: "y", count: 200), order: i, distance: CGFloat(100 - i))
+        }
+        let result = SurroundingContextWindowing.assemble(scored: frags)
+        #expect(result.count <= SurroundingContextWindowing.totalCharBudget)
+        #expect(result.contains("doc99-"))   // nearest (late in document) kept
+        #expect(!result.contains("doc0-"))   // most distant (earliest) dropped
+    }
+
+    @Test func assembleScoredEmitsInDocumentOrder() {
+        // Proximity order (2,0,1) differs from document order (0,1,2). All fit, so
+        // all are kept — but output must be in ascending document order.
+        let frags = [
+            Self.sf("First", order: 0, distance: 50),
+            Self.sf("Second", order: 1, distance: 90),
+            Self.sf("Third", order: 2, distance: 10),
+        ]
+        #expect(SurroundingContextWindowing.assemble(scored: frags) == "First\nSecond\nThird")
+    }
+
+    @Test func assembleScoredPinnedLeadsAndSurvivesBudget() {
+        // A pinned title plus many near fragments that would fill the budget.
+        // The title is admitted first, survives, and leads the output.
+        var frags = [Self.sf("Task Title", order: 0, distance: 0, pinned: true)]
+        frags += (1...100).map { i in
+            Self.sf("comment\(i)-" + String(repeating: "z", count: 200), order: i, distance: CGFloat(i))
+        }
+        let result = SurroundingContextWindowing.assemble(scored: frags)
+        #expect(result.hasPrefix("Task Title\n"))
+        #expect(result.count <= SurroundingContextWindowing.totalCharBudget)
+    }
+
+    @Test func assembleScoredFallbackEqualDistancesKeepsHead() {
+        // No-composer-frame degeneracy: every distance is 0, so selection
+        // collapses to document order and head-retention — identical to the
+        // legacy `assemble(fragments:)` path.
+        let frags = (1...100).map { i in
+            Self.sf("fragment\(i)-" + String(repeating: "x", count: 200), order: i, distance: 0)
+        }
+        let result = SurroundingContextWindowing.assemble(scored: frags)
+        #expect(result.count <= SurroundingContextWindowing.totalCharBudget)
+        #expect(result.contains("fragment1-"))
+        #expect(!result.contains("fragment100-"))
+    }
+
+    @Test func assembleScoredFramelessRanksLast() {
+        // A frameless fragment (greatestFiniteMagnitude) must be evicted before a
+        // near framed one when only one fits. Two at the per-fragment cap, budget
+        // (3000) holds both, so push a third near one to force eviction of the
+        // frameless. Simpler: only one slot via maxFragments would over-engineer;
+        // instead make both at cap and add enough near ones to exhaust budget.
+        var frags = [Self.sf("FRAMELESS-" + String(repeating: "f", count: 200),
+                             order: 0, distance: .greatestFiniteMagnitude)]
+        frags += (1...20).map { i in
+            Self.sf("near\(i)-" + String(repeating: "n", count: 200), order: i, distance: CGFloat(i))
+        }
+        let result = SurroundingContextWindowing.assemble(scored: frags)
+        #expect(result.count <= SurroundingContextWindowing.totalCharBudget)
+        #expect(result.contains("near1-"))        // nearest framed kept
+        #expect(!result.contains("FRAMELESS-"))   // frameless evicted first
+    }
+
+    @Test func assembleScoredJoinedWithinBudgetNoTailTruncation() {
+        // Separator accounting must be exact: the last-admitted-by-order fragment
+        // must be intact (the final `windowed` must not chop the tail). Build
+        // fragments that exactly approach the budget.
+        let frags = (0..<50).map { i in
+            Self.sf("line\(i)-" + String(repeating: "q", count: 200), order: i, distance: CGFloat(i))
+        }
+        let result = SurroundingContextWindowing.assemble(scored: frags)
+        #expect(result.count <= SurroundingContextWindowing.totalCharBudget)
+        // Every emitted line must be a complete (non-truncated) fragment: it ends
+        // with the full 200-char run, never a mid-fragment cut.
+        for line in result.split(separator: "\n") {
+            #expect(line.hasSuffix(String(repeating: "q", count: 200)))
+        }
+    }
+
+    @Test func assembleScoredDedupKeepsFirstCasing() {
+        let frags = [
+            Self.sf("Fix the bug", order: 0, distance: 5),
+            Self.sf("fix   the bug", order: 1, distance: 1),
+            Self.sf("Ship it", order: 2, distance: 9),
+        ]
+        // "fix the bug" dedups to the first occurrence's casing regardless of the
+        // nearer duplicate; output stays in document order.
+        #expect(SurroundingContextWindowing.assemble(scored: frags) == "Fix the bug\nShip it")
+    }
+
+    @Test func assembleScoredTieBreaksByDocumentOrder() {
+        // Equal distance → earlier document order wins admission. Force a single
+        // slot via maxFragments-sized budget pressure by making each at the cap
+        // and the budget admit only the earliest few; assert order-2 (later) is
+        // dropped before order-0/1 at the same distance.
+        let frags = (0..<100).map { i in
+            Self.sf("tie\(i)-" + String(repeating: "t", count: 200), order: i, distance: 7)
+        }
+        let result = SurroundingContextWindowing.assemble(scored: frags)
+        #expect(result.contains("tie0-"))
+        #expect(!result.contains("tie99-"))
+    }
+
+    @Test func assembleScoredIsDeterministic() {
+        let frags = [
+            Self.sf("Alpha", order: 0, distance: 3),
+            Self.sf("Beta", order: 1, distance: 1),
+            Self.sf("Gamma", order: 2, distance: 2),
+        ]
+        #expect(SurroundingContextWindowing.assemble(scored: frags)
+                == SurroundingContextWindowing.assemble(scored: frags))
+    }
+
+    // MARK: - verticalGap
+
+    @Test func verticalGapZeroWhenVerticallyOverlapping() {
+        // Candidate rows intersect the composer's rows.
+        let candidate = CGRect(x: 100, y: 520, width: 300, height: 30)  // [520,550] overlaps [500,540]
+        #expect(SurroundingContextWindowing.verticalGap(candidate: candidate, composer: Self.composer) == 0)
+    }
+
+    @Test func verticalGapAbovePositive() {
+        // Candidate fully above: gap = composer.minY - candidate.maxY = 500 - 430 = 70.
+        let candidate = CGRect(x: 100, y: 400, width: 300, height: 30)  // maxY 430
+        #expect(SurroundingContextWindowing.verticalGap(candidate: candidate, composer: Self.composer) == 70)
+    }
+
+    @Test func verticalGapBelowPositive() {
+        // Candidate fully below: gap = candidate.minY - composer.maxY = 600 - 540 = 60.
+        let candidate = CGRect(x: 100, y: 600, width: 300, height: 30)  // minY 600
+        #expect(SurroundingContextWindowing.verticalGap(candidate: candidate, composer: Self.composer) == 60)
+    }
+
+    @Test func verticalGapIsDeterministic() {
+        let candidate = CGRect(x: 100, y: 300, width: 300, height: 20)
+        let a = SurroundingContextWindowing.verticalGap(candidate: candidate, composer: Self.composer)
+        let b = SurroundingContextWindowing.verticalGap(candidate: candidate, composer: Self.composer)
+        #expect(a == b)
+    }
+
     // MARK: - windowed (idempotent cap)
 
     @Test func windowedEmptyStaysEmpty() {

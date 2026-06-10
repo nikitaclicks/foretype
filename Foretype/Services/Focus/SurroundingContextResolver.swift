@@ -70,20 +70,25 @@ enum SurroundingContextResolver {
 
         CompletionCoordinator.ctxDiag("resolver: containerRole=\(AccessibilityBridge.string(scope.container, kAXRoleAttribute as String) ?? "?") webArea=\(scope.webArea != nil) composerFrame=\(composerFrame.map { "\($0)" } ?? "nil")")
 
-        var fragments: [String] = []
+        var scored: [SurroundingContextWindowing.ScoredFragment] = []
 
-        // Cheap, high-value first fragment: the web-area / document title, which
+        // Cheap, high-value lead fragment: the web-area / document title, which
         // for a ClickUp task/chat typically carries the task or channel name.
-        // Exempt from the spatial filter — always wanted.
+        // Pinned (`order: 0`, exempt from proximity ranking and budget eviction)
+        // and exempt from the spatial filter — always wanted, always first.
         if let webArea = scope.webArea,
            let title = AccessibilityBridge.string(webArea, kAXTitleAttribute as String),
            !title.isEmpty {
-            fragments.append(title)
+            scored.append(.init(text: title, order: 0, distance: 0, pinned: true))
         }
 
-        collect(in: scope.container, focusedHash: focusedHash, composerFrame: composerFrame, into: &fragments)
+        collect(in: scope.container, focusedHash: focusedHash, composerFrame: composerFrame, into: &scored)
 
-        return SurroundingContextWindowing.assemble(fragments: fragments)
+        // Proximity-biased assembly keeps the fragments NEAREST the composer
+        // (recent replies / text just above the caret) within budget. With no
+        // composer frame every distance is 0, so it collapses to the legacy
+        // document-order head retention.
+        return SurroundingContextWindowing.assemble(scored: scored)
     }
 
     // MARK: - Container scoping
@@ -180,23 +185,24 @@ enum SurroundingContextResolver {
     // MARK: - Collection
 
     /// Bounded BFS over the container, capturing text from text-bearing nodes in
-    /// document order. Skips the focused field's subtree and any secure node.
-    /// When `composerFrame` is non-nil, a captured text node is kept only if it is
-    /// spatially related to the composer (same column, within the vertical
-    /// window) — this scopes the panel container down to the actual
-    /// conversation/thread around the composer. nil disables the filter.
+    /// document order and scoring each by proximity to the composer. Skips the
+    /// focused field's subtree and any secure node. When `composerFrame` is
+    /// non-nil, a captured text node is kept only if it is spatially related to
+    /// the composer (same column, within the vertical window) and is tagged with
+    /// its vertical gap so `assemble(scored:)` can keep the NEAREST under budget.
+    /// nil disables the filter (every fragment scores distance 0 → fallback).
     private static func collect(
         in container: AXUIElement,
         focusedHash: Int,
         composerFrame: CGRect?,
-        into fragments: inout [String]
+        into scored: inout [SurroundingContextWindowing.ScoredFragment]
     ) {
         var queue: [(element: AXUIElement, depth: Int)] = [(container, 0)]
         var visited = 0
 
         while !queue.isEmpty,
               visited < maxVisitedNodes,
-              fragments.count < SurroundingContextWindowing.maxFragments {
+              scored.count < SurroundingContextWindowing.maxFragments {
             let (node, depth) = queue.removeFirst()
             visited += 1
 
@@ -208,15 +214,15 @@ enum SurroundingContextResolver {
             let role = AccessibilityBridge.string(node, kAXRoleAttribute as String) ?? ""
 
             if textRoles.contains(role) {
-                if let text = textValue(of: node), isNear(node, composerFrame) {
-                    fragments.append(text)
+                if let text = textValue(of: node), let distance = gap(node, composerFrame) {
+                    scored.append(.init(text: text, order: scored.count, distance: distance, pinned: false))
                 }
                 continue  // leaf text; no useful children
             }
             if valueTextRoles.contains(role) {
                 if let value = AccessibilityBridge.string(node, kAXValueAttribute as String),
-                   !value.isEmpty, isNear(node, composerFrame) {
-                    fragments.append(value)
+                   !value.isEmpty, let distance = gap(node, composerFrame) {
+                    scored.append(.init(text: value, order: scored.count, distance: distance, pinned: false))
                 }
                 continue
             }
@@ -230,17 +236,24 @@ enum SurroundingContextResolver {
             }
         }
 
-        CompletionCoordinator.ctxDiag("collect: visited=\(visited)/\(maxVisitedNodes) kept=\(fragments.count) queueLeft=\(queue.count)")
+        CompletionCoordinator.ctxDiag("collect: visited=\(visited)/\(maxVisitedNodes) kept=\(scored.count) queueLeft=\(queue.count)")
     }
 
-    /// Spatial gate for a captured text node. Cheap pre-checks have already
-    /// passed, so we read this node's frame (one AX call per *kept-candidate*
-    /// node, not per visited node) and delegate the pure geometry to
-    /// `SurroundingContextWindowing`. With no composer frame the filter is off.
-    private static func isNear(_ node: AXUIElement, _ composerFrame: CGRect?) -> Bool {
-        guard let composerFrame else { return true }
-        guard let nodeFrame = AccessibilityBridge.frame(node) else { return true }
-        return SurroundingContextWindowing.isSpatiallyRelated(candidate: nodeFrame, composer: composerFrame)
+    /// Spatial gate + proximity score for a captured text node. Reads this node's
+    /// frame ONCE (one AX call per *kept-candidate* node, not per visited node)
+    /// and derives both the include decision and the score from it. Returns the
+    /// vertical gap to the composer (0 = adjacent/overlapping), or nil to EXCLUDE
+    /// the node (out of the spatial window). With no composer frame the filter is
+    /// off → 0 (every fragment equal, fallback to document order). A node with no
+    /// frame is kept but ranked LAST (`.greatestFiniteMagnitude`) so it is evicted
+    /// before real, localizable content under budget pressure.
+    private static func gap(_ node: AXUIElement, _ composerFrame: CGRect?) -> CGFloat? {
+        guard let composerFrame, !composerFrame.isEmpty else { return 0 }
+        guard let nodeFrame = AccessibilityBridge.frame(node) else { return .greatestFiniteMagnitude }
+        guard SurroundingContextWindowing.isSpatiallyRelated(candidate: nodeFrame, composer: composerFrame) else {
+            return nil
+        }
+        return SurroundingContextWindowing.verticalGap(candidate: nodeFrame, composer: composerFrame)
     }
 
     /// Read a text node's content: prefer AXValue, fall back to AXTitle.

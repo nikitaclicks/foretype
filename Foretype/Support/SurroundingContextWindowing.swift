@@ -12,8 +12,11 @@ enum SurroundingContextWindowing {
 
     /// Maximum characters retained from the whole assembled surrounding context.
     /// Sits comfortably under the ~1000-char preceding window so a request stays
-    /// modest; the head (earliest, highest-priority fragments: title →
-    /// description → recent comments) is retained.
+    /// modest. The PRIMARY path (`assemble(scored:)`) spends this budget on the
+    /// fragments spatially NEAREST the composer (recent replies / the text just
+    /// above the caret), with the title pinned; survivors are re-emitted in
+    /// document order. Only the legacy fallback (`assemble(fragments:)` /
+    /// `windowed`, used when no composer frame is available) retains the head.
     static let totalCharBudget = 3000
     /// Maximum characters retained from any single fragment, so one huge node
     /// (e.g. a pasted wall of text) cannot eat the whole budget.
@@ -21,12 +24,82 @@ enum SurroundingContextWindowing {
     /// Maximum number of distinct fragments retained.
     static let maxFragments = 200
 
+    /// A collected fragment tagged for proximity-biased selection.
+    /// - `order`: document-order index, used to re-emit survivors in reading
+    ///   order so the conversation stays coherent for the model.
+    /// - `distance`: vertical gap to the composer in points (smaller = nearer =
+    ///   higher priority). Frameless nodes get `.greatestFiniteMagnitude` so they
+    ///   are evicted first under budget pressure; the no-composer-frame fallback
+    ///   uses `0` for every fragment so selection collapses to document order.
+    /// - `pinned`: the web-area title lead — admitted first and exempt from
+    ///   proximity ranking and budget eviction.
+    struct ScoredFragment {
+        let text: String
+        let order: Int
+        let distance: CGFloat
+        let pinned: Bool
+    }
+
+    /// Proximity-biased assembly — the PRIMARY path. Same cleaning as
+    /// `assemble(fragments:)` (trim, drop empties, per-fragment head cap,
+    /// normalized dedup keeping the first occurrence's casing), but SELECTION is
+    /// by proximity: pinned fragments are admitted first, then the rest by
+    /// ascending `distance` (ties broken by document `order`), accumulating until
+    /// `totalCharBudget` or `maxFragments` would be exceeded. Survivors are then
+    /// re-emitted in document order so the thread is not scrambled. The trailing
+    /// `windowed` is an idempotent guard: with exact separator accounting the
+    /// selection is already at/under budget, so it is a no-op (and never chops
+    /// the nearest content off the tail).
+    static func assemble(scored: [ScoredFragment]) -> String {
+        // 1. Clean + dedup in document order (mirror `assemble(fragments:)`).
+        var seen = Set<String>()
+        var cleaned: [ScoredFragment] = []
+        for frag in scored {
+            let trimmed = frag.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { continue }
+            let capped = cappedToHead(trimmed, limit: perFragmentCharCap)
+            let key = normalizedKey(capped)
+            if key.isEmpty { continue }
+            if seen.contains(key) { continue }
+            seen.insert(key)
+            cleaned.append(ScoredFragment(text: capped, order: frag.order, distance: frag.distance, pinned: frag.pinned))
+        }
+
+        // 2. Pinned lead admitted first (exempt from eviction); rest nearest-first.
+        let pinned = cleaned.filter { $0.pinned }
+        let rest = cleaned.filter { !$0.pinned }
+            .sorted { ($0.distance, $0.order) < ($1.distance, $1.order) }
+
+        var admitted: [ScoredFragment] = []
+        var total = 0
+        for p in pinned {
+            total += (admitted.isEmpty ? 0 : 1) + p.text.count
+            admitted.append(p)
+        }
+        // 3. Greedily pack the budget with the nearest fragments. A fragment that
+        // does not fit is skipped (not a break): a farther-but-shorter one may
+        // still fit. Stop only when the fragment count cap is reached.
+        for r in rest {
+            if admitted.count >= maxFragments { break }
+            let sep = admitted.isEmpty ? 0 : 1
+            if total + sep + r.text.count > totalCharBudget { continue }
+            total += sep + r.text.count
+            admitted.append(r)
+        }
+
+        // 4. Re-emit in document order.
+        let ordered = admitted.sorted { $0.order < $1.order }
+        return windowed(ordered.map(\.text).joined(separator: "\n"))
+    }
+
     /// Assemble raw collected fragments into a single bounded, de-duplicated,
     /// newline-joined string. Trims each fragment, drops empties, caps each to
     /// `perFragmentCharCap`, de-duplicates by a normalized key (Chromium often
     /// exposes the same text on a wrapper title and its child static text), keeps
     /// at most `maxFragments`, then caps the joined result to `totalCharBudget`
-    /// retaining the head. Fragment order is preserved (document order).
+    /// retaining the head. Fragment order is preserved (document order). This is
+    /// the FALLBACK path (no composer frame); the proximity-biased
+    /// `assemble(scored:)` is the primary one.
     static func assemble(fragments: [String]) -> String {
         var seen = Set<String>()
         var kept: [String] = []
@@ -91,6 +164,11 @@ enum SurroundingContextWindowing {
     /// overlap (below) is what excludes a main view beside a narrow side-chat;
     /// this vertical bound mainly drops a distant feed under an inline reply box.
     /// Primary tuning dial — validate against a real long-description task.
+    /// Over-reaching above is now cheaper than it was: within the kept window
+    /// `assemble(scored:)` prioritizes the fragments NEAREST the composer, so a
+    /// distant-but-in-window fragment is evicted under budget pressure rather than
+    /// crowding out a near reply (the tradeoff: a tall description far above a long
+    /// thread may be dropped — only the pinned title is guaranteed).
     static let verticalWindowAboveFactor: CGFloat = 8.0
     /// Vertical reach BELOW the composer, in multiples of its height. Small —
     /// just enough for a trailing label, not a whole feed beneath a reply box.
@@ -137,6 +215,19 @@ enum SurroundingContextWindowing {
         let bottomLimit = composer.maxY + verticalWindowBelowFactor * h  // furthest below (largest y)
         // Candidate's vertical extent must intersect the [topLimit, bottomLimit] band.
         return candidate.maxY >= topLimit && candidate.minY <= bottomLimit
+    }
+
+    /// Vertical gap in points between `candidate` and `composer` (AX y-down, so
+    /// "above" is a smaller y). `0` when their vertical extents overlap (the
+    /// candidate shares the composer's rows). Otherwise the positive distance
+    /// from the nearer edge. Unsigned — an above and a below candidate at equal
+    /// distance score equally, which is acceptable because the below-window is
+    /// already clamped tight (`verticalWindowBelowFactor`). Used by
+    /// `assemble(scored:)` to rank kept fragments by proximity; pure geometry.
+    static func verticalGap(candidate: CGRect, composer: CGRect) -> CGFloat {
+        if candidate.maxY < composer.minY { return composer.minY - candidate.maxY }  // above
+        if candidate.minY > composer.maxY { return candidate.minY - composer.maxY }  // below
+        return 0  // vertical overlap
     }
 
     // MARK: - Private

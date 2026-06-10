@@ -63,9 +63,15 @@ is passed *into* the builder, which only windows it. Key properties:
   stopping at the web area, so sidebars / nav / browser chrome are excluded.
   Web composers nest deep, so the climb cap is generous (~20 hops) — a shallow
   cap stops at a sparse sub-wrapper that misses the surrounding messages.
-- **Bounded.** Capped by node-visit count (~800), per-fragment chars (~240),
-  fragment count (~200), and a total budget (~3000 chars), de-duplicated, in
-  document order, by a pure helper (`SurroundingContextWindowing`).
+- **Bounded, nearest-first.** Capped by node-visit count, per-fragment chars
+  (~240), fragment count (~200), and a total budget (~3000 chars), de-duplicated,
+  by a pure helper (`SurroundingContextWindowing`). When over budget it keeps the
+  fragments spatially **closest to the composer** (recent replies / the text just
+  above the caret), scored by vertical gap — *not* the document-order head, since
+  the composer sits at the bottom and the freshest content is last. The web-area
+  title is **pinned** (always kept). Survivors are re-emitted in document order so
+  the thread stays coherent. (Without a composer frame this collapses to the
+  legacy document-order head retention.)
 - **Composer-only.** Gathered only for multi-line composer fields (AX text
   areas); single-line search/title boxes get `""` so they don't pull panel noise.
 - **Never the focused field's own text.** The focused subtree is pruned during
