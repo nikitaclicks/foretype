@@ -6,6 +6,9 @@ through Accessibility, observes typing through a global keyboard tap, asks a
 language model for a short continuation, renders that continuation as **ghost
 text** next to the caret, and inserts it when the user presses `Tab`.
 
+## Demo
+https://github.com/user-attachments/assets/1c1a7aa1-4e0a-414d-8e0f-5bd851a34a04
+
 It runs as a lightweight background agent (no dock icon, no main window). It
 supports two completion backends:
 
