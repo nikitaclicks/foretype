@@ -1,6 +1,6 @@
 cask "foretype" do
-  version "0.1.3"
-  sha256 "be2494f31ee1caf1f88bb7b13e25023939e882d94b7d00a0d3a037cd5340f260"
+  version "0.1.4"
+  sha256 "c32baeb190eefeff694b58499dfeef29d9de56efae89a3495832c49b6e5a9874"
 
   url "https://github.com/nikitaclicks/foretype/releases/download/v#{version}/Foretype-v#{version}.zip"
   name "Foretype"
