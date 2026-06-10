@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// SurroundingContextWindowing (doc 06) — pure helpers that bound and clean the
 /// *surrounding* AX content gathered from around the focused field before it
@@ -71,6 +72,71 @@ enum SurroundingContextWindowing {
             return true
         }
         return kept.joined(separator: "\n")
+    }
+
+    // MARK: - Spatial proximity (doc 06)
+
+    /// A surrounding text node counts as "near" the composer only if it shares
+    /// at least this fraction of its own width with the composer's column. Keeps
+    /// the conversation/thread in the same column while dropping a main view that
+    /// sits beside a narrow side-chat. Modest so an indented message that merely
+    /// starts offset still qualifies.
+    static let minHorizontalOverlapFraction: CGFloat = 0.30
+    /// Vertical reach ABOVE the composer, in multiples of the composer's own
+    /// height (scale-free across a tall task description and a short chat
+    /// composer). The relevant content lives above the composer — the thread
+    /// being replied to, a task's description and comments. Generous on purpose:
+    /// the must-not-regress ClickUp task panel puts a tall description well above
+    /// a short comment box, so under-reaching would clip it. The horizontal-column
+    /// overlap (below) is what excludes a main view beside a narrow side-chat;
+    /// this vertical bound mainly drops a distant feed under an inline reply box.
+    /// Primary tuning dial — validate against a real long-description task.
+    static let verticalWindowAboveFactor: CGFloat = 8.0
+    /// Vertical reach BELOW the composer, in multiples of its height. Small —
+    /// just enough for a trailing label, not a whole feed beneath a reply box.
+    static let verticalWindowBelowFactor: CGFloat = 2.0
+
+    /// Fraction of `candidate`'s width that overlaps `composer`'s horizontal
+    /// extent (intersection width / candidate width). 1.0 when `candidate` is
+    /// fully inside the composer's column, 0 when disjoint. Zero-width candidate
+    /// returns 0. Pure geometry; coordinate convention is irrelevant for x.
+    static func horizontalOverlapFraction(_ candidate: CGRect, _ composer: CGRect) -> CGFloat {
+        let width = candidate.width
+        guard width > 0 else { return 0 }
+        let left = max(candidate.minX, composer.minX)
+        let right = min(candidate.maxX, composer.maxX)
+        let overlap = right - left
+        guard overlap > 0 else { return 0 }
+        return overlap / width
+    }
+
+    /// Whether a surrounding text node at `candidate` is spatially related to the
+    /// `composer` the user is typing in: it shares the composer's column
+    /// (horizontal overlap ≥ `minHorizontalOverlapFraction`) AND falls within the
+    /// bounded vertical window around the composer.
+    ///
+    /// AX frames are top-left origin / y-down, so "above the composer" means a
+    /// SMALLER y. The window is `[composer.minY - above*h, composer.maxY +
+    /// below*h]` where `h` is the composer height; a candidate is inside when its
+    /// vertical extent intersects that band.
+    ///
+    /// An empty / zero-area `candidate` (a node with no usable frame) returns
+    /// `true`: we cannot localize it, so we don't over-filter — the node-visit
+    /// cap and dedup still bound it. An empty `composer` also returns `true`
+    /// (filter effectively disabled).
+    static func isSpatiallyRelated(candidate: CGRect, composer: CGRect) -> Bool {
+        if composer.isEmpty { return true }
+        if candidate.isEmpty { return true }
+
+        guard horizontalOverlapFraction(candidate, composer) >= minHorizontalOverlapFraction else {
+            return false
+        }
+
+        let h = composer.height
+        let topLimit = composer.minY - verticalWindowAboveFactor * h     // furthest above (smallest y)
+        let bottomLimit = composer.maxY + verticalWindowBelowFactor * h  // furthest below (largest y)
+        // Candidate's vertical extent must intersect the [topLimit, bottomLimit] band.
+        return candidate.maxY >= topLimit && candidate.minY <= bottomLimit
     }
 
     // MARK: - Private

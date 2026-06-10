@@ -152,11 +152,12 @@ extension CompletionCoordinator {
     /// shouldn't pull panel context (non-composer, secure, or unsupported), which
     /// makes the assembled prompt byte-identical to the no-context case.
     func surroundingContext(for snapshot: FocusSnapshot) -> String {
-        // Only multi-line composer fields benefit; a single-line search/title box
-        // would just pull in unrelated panel noise.
+        // Only composer-like fields benefit; a search box would just pull in
+        // unrelated panel noise.
         guard snapshot.capability == .supported,
               !snapshot.isSecure,
-              snapshot.role == (kAXTextAreaRole as String) else {
+              Self.isContextEligible(role: snapshot.role, subrole: snapshot.subrole) else {
+            Self.ctxDiag("gate=BLOCK role=\(snapshot.role) subrole=\(snapshot.subrole ?? "-") cap=\(snapshot.capability) secure=\(snapshot.isSecure)")
             return ""
         }
 
@@ -172,6 +173,7 @@ extension CompletionCoordinator {
         guard let focused = AccessibilityBridge.systemFocusedElement(),
               let resolution = FocusResolver.resolve(focused: focused),
               !resolution.isSecure else {
+            Self.ctxDiag("gate=PASS but resolution=nil role=\(snapshot.role) subrole=\(snapshot.subrole ?? "-")")
             return ""
         }
 
@@ -179,11 +181,42 @@ extension CompletionCoordinator {
         // Belt-and-suspenders: drop any fragment that is the in-progress text.
         let cleaned = SurroundingContextWindowing.removingOverlap(gathered, with: snapshot.precedingText)
 
+        Self.ctxDiag("gate=PASS role=\(resolution.role) subrole=\(resolution.subrole ?? "-") composerFrame=\(AccessibilityBridge.frame(resolution.element).map { "\($0)" } ?? "nil") gatheredLen=\(gathered.count) cleanedLen=\(cleaned.count) cleaned=<<<\(cleaned.prefix(600))>>>")
+
         surroundingContextCache = SurroundingContextCacheEntry(
             identity: snapshot.identity,
             context: cleaned,
             capturedAt: surroundingClock.now
         )
         return cleaned
+    }
+
+    /// Append a line to `/tmp/foretype-ctxdiag.log`, gated on the `ctxDiag`
+    /// UserDefaults flag (like `pollDiag`). Temporary surrounding-context
+    /// diagnostics; a normal run pays nothing. Remove once the path is verified.
+    static func ctxDiag(_ message: String) {
+        guard UserDefaults.standard.bool(forKey: "ctxDiag") else { return }
+        guard let data = (message + "\n").data(using: .utf8) else { return }
+        let url = URL(fileURLWithPath: "/tmp/foretype-ctxdiag.log")
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile(); handle.write(data); try? handle.close()
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
+    /// Whether a focused field should pull read-only surrounding context (doc 06).
+    /// Composer-like fields benefit; search boxes don't (they'd pull unrelated
+    /// panel noise). Multi-line text areas always qualify (the original ClickUp
+    /// task-panel case); single-line web composers (Twitter reply, ClickUp
+    /// side-chat) report AXTextField/AXComboBox and qualify unless they are
+    /// search fields. `FocusResolver` already restricts `role` to these three
+    /// editable roles, so anything else is excluded by default.
+    static func isContextEligible(role: String, subrole: String?) -> Bool {
+        if role == (kAXTextAreaRole as String) { return true }
+        if role == (kAXTextFieldRole as String) || role == "AXComboBox" {
+            return subrole != (kAXSearchFieldSubrole as String)
+        }
+        return false
     }
 }
