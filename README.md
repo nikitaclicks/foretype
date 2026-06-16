@@ -1,16 +1,13 @@
 # Foretype
 
-<!-- DEMO VIDEO: replace the URL below with the github.com/user-attachments URL
-     you get by dragging ~/Documents/foretype.mov into a GitHub issue/comment box.
-     Keep it on its own line with blank lines around it so GitHub renders a player. -->
-
-https://github.com/user-attachments/assets/REPLACE_ME
-
 Foretype is a macOS menu bar app that provides **on-device-aware inline
 autocomplete in any text field**. It watches which text field is focused
 through Accessibility, observes typing through a global keyboard tap, asks a
 language model for a short continuation, renders that continuation as **ghost
 text** next to the caret, and inserts it when the user presses `Tab`.
+
+## Demo
+https://github.com/user-attachments/assets/1c1a7aa1-4e0a-414d-8e0f-5bd851a34a04
 
 It runs as a lightweight background agent (no dock icon, no main window). It
 supports two completion backends:
