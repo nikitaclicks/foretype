@@ -172,31 +172,31 @@ enum CompletionTextNormalizer {
     /// in-progress word with NO leading space, and begins a new word WITH a single
     /// leading space. The normalizer therefore never fabricates a separator — it
     /// only strips echoes and normalizes the model-supplied leading space. Steps:
-    /// 1. Full echo: if the output begins with the entire preceding text, drop it.
-    /// 2. In-progress word: if the caret sits after a word character and the model
-    ///    repeated that word, strip the repeat. No separator is invented here.
-    /// 3. Leading whitespace: drop it entirely when the caret already follows
+    /// 1. Echoed suffix: drop the longest suffix of the preceding text that the
+    ///    output begins with, where that suffix starts at a word boundary. This
+    ///    covers a full echo (suffix from the start), a repeated in-progress word
+    ///    (the trailing word run), and the model echoing one or more whole trailing
+    ///    words of the context. No separator is invented here.
+    /// 2. Leading whitespace: drop it entirely when the caret already follows
     ///    whitespace, else collapse a leading run to a single space.
     private static func reconcile(_ text: String, preceding: String) -> String {
         guard !text.isEmpty else { return text }
         var text = text
 
-        // 1. Full echo of the entire preceding context.
-        if !preceding.isEmpty, text.hasPrefix(preceding) {
-            text = String(text.dropFirst(preceding.count))
-        } else {
-            // 2. In-progress word at the caret (the trailing non-boundary run).
-            //    If the model echoed it, keep only the rest. Otherwise leave the
-            //    text untouched — a continuation has no leading space, and a new
-            //    word carries its own leading space (handled by step 3). We never
-            //    fabricate a separator, which is what split words mid-typing.
-            let partial = trailingWordRun(preceding)
-            if !partial.isEmpty, let remainder = dropMatchingPrefix(text, partial: partial) {
+        // 1. Strip the longest boundary-anchored suffix of the preceding context
+        //    that the model echoed back. Candidate suffixes start at index 0 or
+        //    immediately after a word boundary (so they begin with a word character,
+        //    never whitespace); the first match walking longest→shortest is the
+        //    longest echo. We never fabricate a separator — only strip the echo.
+        for start in wordStartIndices(preceding) {
+            let suffix = String(preceding[start...])
+            if !suffix.isEmpty, let remainder = dropMatchingPrefix(text, partial: suffix) {
                 text = remainder
+                break
             }
         }
 
-        // 3. Leading-whitespace normalization.
+        // 2. Leading-whitespace normalization.
         if let last = preceding.last, last.isWhitespace {
             // The caret already follows whitespace — the separator is in place.
             text = String(text.drop(while: { $0.isWhitespace }))
@@ -208,16 +208,24 @@ enum CompletionTextNormalizer {
         return text
     }
 
-    /// The maximal trailing run of non-boundary (word) characters in `text`, i.e.
-    /// the word currently being typed at the caret. Empty when `text` is empty or
-    /// ends at a boundary (whitespace / punctuation / symbol).
-    private static func trailingWordRun(_ text: String) -> String {
-        var result: [Character] = []
-        for character in text.reversed() {
-            if isBoundary(character) { break }
-            result.append(character)
+    /// Word-start indices of `text`, ordered so the suffix `text[index...]` runs
+    /// from longest to shortest. A word start is index 0 (the whole string) or any
+    /// index whose previous character is a boundary and whose own character is not
+    /// — so each suffix begins with a word character, never whitespace.
+    private static func wordStartIndices(_ text: String) -> [String.Index] {
+        guard !text.isEmpty else { return [] }
+        var indices: [String.Index] = []
+        var index = text.startIndex
+        var previousWasBoundary = true
+        while index < text.endIndex {
+            let isBound = isBoundary(text[index])
+            if previousWasBoundary, !isBound {
+                indices.append(index)
+            }
+            previousWasBoundary = isBound
+            index = text.index(after: index)
         }
-        return String(result.reversed())
+        return indices
     }
 
     /// If `text` begins with `partial` (compared case-insensitively), drop that

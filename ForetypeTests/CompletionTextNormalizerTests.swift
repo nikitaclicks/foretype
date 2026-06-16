@@ -74,6 +74,31 @@ struct CompletionTextNormalizerTests {
         #expect(out == "autocomplete")
     }
 
+    @Test func stripsMultiWordEchoAfterTrailingSpace() {
+        // The regression: caret follows a space (so there is no in-progress word),
+        // and the model echoed several whole trailing words before continuing.
+        // The whole echoed run must be stripped, leaving only the continuation.
+        let req = request(preceding: "I want to go to the ")
+        let out = CompletionTextNormalizer.normalize("go to the store", request: req)
+        #expect(out == "store")
+    }
+
+    @Test func stripsMultiWordEchoWithoutTrailingSpace() {
+        // Same multi-word echo, but the caret is at the end of a complete word with
+        // no trailing space. The echo is stripped and the model-supplied separator
+        // for the fresh word survives (collapsed to one space).
+        let req = request(preceding: "I want to go to the")
+        let out = CompletionTextNormalizer.normalize("go to the store", request: req)
+        #expect(out == " store")
+    }
+
+    @Test func stripsPartialMultiWordEcho() {
+        // The model echoed a trailing word that is shorter than the full context.
+        let req = request(preceding: "the cat sat on the")
+        let out = CompletionTextNormalizer.normalize("the mat", request: req)
+        #expect(out == " mat")
+    }
+
     // MARK: - Quote stripping
 
     @Test func stripsWrappingDoubleQuotes() {
