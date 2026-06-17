@@ -97,19 +97,24 @@ extension CompletionCoordinator {
     /// Runs on the main actor (the whole coordinator is `@MainActor`).
     func applyResult(_ result: CompletionResult, request: CompletionRequest, token: UInt64) {
         // 1. Token must still be current.
-        guard token == generation else { return }
+        guard token == generation else {
+            Self.genDiag("evt=drop reason=stale-token")
+            return
+        }
 
         // 2. Re-read live focus; identity + preceding text must still match.
         guard let live = focus.current,
               let issued = pendingSnapshot,
               live.identity == issued.identity,
               live.precedingText == issued.precedingText else {
+            Self.genDiag("evt=drop reason=focus-changed")
             return
         }
 
         // 3. Normalize the raw output.
         let cleaned = CompletionTextNormalizer.normalize(result.text, request: request)
         guard !cleaned.isEmpty else {
+            Self.genDiag("evt=drop reason=empty-after-normalization rawLen=\(result.text.count)")
             endSession(hideReason: "empty after normalization")
             setState(.idle)
             return
@@ -120,6 +125,7 @@ extension CompletionCoordinator {
         session = newSession
         pendingSnapshot = live
         setState(.previewing(newSession))
+        Self.genDiag("evt=ok latencyMs=\(Self.diagMillis(result.latency)) outLen=\(cleaned.count) app=\(request.appName)")
 
         if let geometry = overlayGeometry(for: live) {
             overlay.show(newSession.remainder, geometry: geometry)
@@ -135,11 +141,12 @@ extension CompletionCoordinator {
         case .cancelled:
             return  // superseded → ignore.
         case .unavailable(let reason):
+            Self.genDiag("evt=error case=unavailable reason=\"\(reason)\"")
             backendAvailable = false
             endSession(hideReason: "backend unavailable")
             setState(.disabled(reason: .backendUnavailable))
-            _ = reason
         case .generationFailed(let reason):
+            Self.genDiag("evt=error case=generationFailed reason=\"\(reason)\"")
             endSession(hideReason: "generation failed")
             setState(.failed(reason: reason))
         }
@@ -203,6 +210,37 @@ extension CompletionCoordinator {
         } else {
             try? data.write(to: url)
         }
+    }
+
+    /// Append a timestamped line to `/tmp/foretype-gendiag.log`, gated on the
+    /// `genDiag` UserDefaults flag (mirrors `ctxDiag`). Records the coordinator-side
+    /// outcome of each generation cycle — error, silent drop, or successful present
+    /// — so the log reads as a full timeline alongside the engine's `[engine]`
+    /// lines. Temporary; remove once the failure path is understood.
+    static func genDiag(_ message: String) {
+        guard UserDefaults.standard.bool(forKey: "genDiag") else { return }
+        guard let data = ("[coord] \(diagTimestamp()) \(message)\n").data(using: .utf8) else { return }
+        let url = URL(fileURLWithPath: "/tmp/foretype-gendiag.log")
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile(); handle.write(data); try? handle.close()
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
+    private static let diagDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    /// Current wall-clock time as an ISO-8601 string for diagnostic lines.
+    static func diagTimestamp() -> String { diagDateFormatter.string(from: Date()) }
+
+    /// A `Duration` as whole milliseconds, for the `latencyMs` diagnostic field.
+    static func diagMillis(_ duration: Duration) -> Int {
+        let components = duration.components
+        return Int(components.seconds * 1000 + components.attoseconds / 1_000_000_000_000_000)
     }
 
     /// Whether a focused field should pull read-only surrounding context (doc 06).

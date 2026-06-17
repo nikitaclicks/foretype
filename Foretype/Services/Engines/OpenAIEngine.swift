@@ -40,6 +40,7 @@ actor OpenAIEngine: CompletionEngine {
         try Task.checkCancellation()
 
         let urlRequest = try makeURLRequest(for: request)
+        let host = urlRequest.url?.host ?? "?"
 
         let clock = ContinuousClock()
         let started = clock.now
@@ -54,8 +55,10 @@ actor OpenAIEngine: CompletionEngine {
             throw CompletionEngineError.cancelled
         } catch let urlError as URLError {
             // Transport errors and timeouts are transient.
+            Self.genDiag("evt=net host=\(host) code=\(urlError.code.rawValue) desc=\"\(urlError.localizedDescription)\"")
             throw CompletionEngineError.generationFailed(reason: "Network error: \(urlError.localizedDescription)")
         } catch {
+            Self.genDiag("evt=net host=\(host) code=? desc=\"\(error.localizedDescription)\"")
             throw CompletionEngineError.generationFailed(reason: "Request failed: \(error.localizedDescription)")
         }
 
@@ -65,6 +68,7 @@ actor OpenAIEngine: CompletionEngine {
         let latency = started.duration(to: clock.now)
 
         guard let http = response as? HTTPURLResponse else {
+            Self.genDiag("evt=non-http host=\(host) body=\"\(Self.bodySnippet(data))\"")
             throw CompletionEngineError.generationFailed(reason: "Non-HTTP response")
         }
 
@@ -75,11 +79,13 @@ actor OpenAIEngine: CompletionEngine {
         case 400..<500:
             // Configuration problem the user must fix (bad key, wrong path,
             // unknown model). Surfaced as `disabled` by the coordinator.
+            Self.genDiag("evt=http host=\(host) status=\(http.statusCode) body=\"\(Self.bodySnippet(data))\"")
             throw CompletionEngineError.unavailable(
                 reason: "Endpoint returned HTTP \(http.statusCode). Check the base URL, model, and API key."
             )
         default:
             // 5xx and anything else: transient.
+            Self.genDiag("evt=http host=\(host) status=\(http.statusCode) body=\"\(Self.bodySnippet(data))\"")
             throw CompletionEngineError.generationFailed(reason: "Endpoint returned HTTP \(http.statusCode).")
         }
     }
@@ -152,23 +158,82 @@ actor OpenAIEngine: CompletionEngine {
             "max_tokens": request.sampling.maxTokens,
             "top_p": request.sampling.topP,
             "stream": false,
+            // Disable model "thinking"/reasoning. Reasoning models (Qwen3, and the
+            // reasoning-parser servers wrapping Gemma etc.) otherwise emit a
+            // chain-of-thought into `reasoning_content` and, on the small token
+            // budget an autocomplete uses, get truncated (`finish_reason: length`)
+            // before producing any `content` — yielding empty completions. This is
+            // the chat-template flag honored by vLLM / SGLang / MLX servers; other
+            // OpenAI-compatible servers ignore the unknown field harmlessly. The
+            // defensive parse in `parseContent` covers servers that don't honor it.
+            "chat_template_kwargs": ["enable_thinking": false],
         ]
     }
 
     /// Pure helper: pull `choices[0].message.content` out of a chat-completions
-    /// response. Throws `generationFailed` if the shape is missing/empty.
+    /// response. Throws `generationFailed` only when the response shape is genuinely
+    /// malformed (not valid JSON, or no `choices[0].message`).
+    ///
+    /// A *valid* response whose `content` is missing or empty is NOT an error: it
+    /// happens when a reasoning model spends its whole token budget on
+    /// `reasoning_content` (`finish_reason: length`) and never emits content. We
+    /// return "" so the coordinator treats it as "no suggestion" (silent) rather
+    /// than surfacing a red failure. `chat_template_kwargs.enable_thinking=false`
+    /// in `makeBody` prevents this on servers that honor it; this is the safety net
+    /// for those that don't.
     static func parseContent(from data: Data) throws -> String {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            genDiag("evt=parse detail=malformed-json body=\"\(bodySnippet(data))\"")
             throw CompletionEngineError.generationFailed(reason: "Malformed response JSON.")
         }
         guard
             let choices = root["choices"] as? [[String: Any]],
             let first = choices.first,
-            let message = first["message"] as? [String: Any],
-            let content = message["content"] as? String
+            let message = first["message"] as? [String: Any]
         else {
-            throw CompletionEngineError.generationFailed(reason: "Response missing choices[0].message.content.")
+            genDiag("evt=parse detail=malformed-shape body=\"\(bodySnippet(data))\"")
+            throw CompletionEngineError.generationFailed(reason: "Response missing choices[0].message.")
+        }
+        guard let content = message["content"] as? String, !content.isEmpty else {
+            // Valid response, but no usable content (reasoning-only / truncated).
+            genDiag("evt=parse detail=empty-content body=\"\(bodySnippet(data))\"")
+            return ""
         }
         return content
+    }
+
+    // MARK: - Diagnostics (temporary; gated on the `genDiag` UserDefaults flag)
+
+    /// Append a line to `/tmp/foretype-gendiag.log`, gated on the `genDiag`
+    /// UserDefaults flag (mirrors `CompletionCoordinator.ctxDiag`). Captures the
+    /// raw OpenAI failure detail — HTTP status + response body, network error code,
+    /// or parse failure — that the thrown `CompletionEngineError` discards. Logs
+    /// only the response body and request host: never the API key or request body.
+    /// Remove once the failure path is understood.
+    static func genDiag(_ message: String) {
+        guard UserDefaults.standard.bool(forKey: "genDiag") else { return }
+        let timestamp = diagDateFormatter.string(from: Date())
+        guard let data = ("[engine] \(timestamp) \(message)\n").data(using: .utf8) else { return }
+        let url = URL(fileURLWithPath: "/tmp/foretype-gendiag.log")
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile(); handle.write(data); try? handle.close()
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
+    private static let diagDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    /// A short, single-line snippet of a response body for diagnostics: decoded as
+    /// UTF-8, newlines collapsed, capped to `limit` characters.
+    static func bodySnippet(_ data: Data, limit: Int = 400) -> String {
+        guard var s = String(data: data, encoding: .utf8) else { return "<non-utf8 \(data.count)B>" }
+        s = s.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+        if s.count > limit { s = String(s.prefix(limit)) + "…" }
+        return s
     }
 }
