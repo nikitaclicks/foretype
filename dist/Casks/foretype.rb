@@ -1,6 +1,6 @@
 cask "foretype" do
-  version "0.1.8"
-  sha256 "5234fb38257697fd4f178106831045e5c276e88911b4571aa5cb5b7e287deab6"
+  version "0.1.9"
+  sha256 "5e7f4919a46667fcf78d55dcb0e79a9af176760c36067875b7cf44aaf9462ff1"
 
   url "https://github.com/nikitaclicks/foretype/releases/download/v#{version}/Foretype-v#{version}.zip"
   name "Foretype"
@@ -11,8 +11,9 @@ cask "foretype" do
 
   app "Foretype.app"
 
-  # Not notarized (AeroSpace-style): strip the quarantine flag on install so the
-  # app launches without a Gatekeeper "unidentified developer" block.
+  # Not notarized: the bundle is signed with a stable self-signed certificate,
+  # so strip the quarantine flag on install so the app launches without a
+  # Gatekeeper "unidentified developer" block.
   postflight do
     system "xattr", "-dr", "com.apple.quarantine", "#{appdir}/Foretype.app"
   end

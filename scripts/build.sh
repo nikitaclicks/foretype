@@ -5,8 +5,9 @@
 #
 #   ./scripts/build.sh 0.1.0
 #
-# Signing/notarization rationale lives in scripts/release.sh's header. Override
-# the signing identity for a future Developer ID cert via SIGN_IDENTITY=...
+# Signing/notarization rationale lives in scripts/release.sh's header. The
+# shipped bundle is re-signed for distribution (step 2b); override that identity
+# via DIST_SIGN_IDENTITY=... (e.g. "-" for ad-hoc, or a future Developer ID cert).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO_ROOT="$PWD"
@@ -44,10 +45,36 @@ xcodebuild "${BUILD_ARGS[@]}" clean build \
   | grep -E "error:|warning:|BUILD (SUCCEEDED|FAILED)" || true
 [ -d "$APP" ] || { echo "✗ Build did not produce $APP"; exit 1; }
 
+# --- 2b. Re-sign for distribution (portable identity, no get-task-allow) ------
+# xcodebuild signs with the project's Apple Development cert — a *development*
+# signature that carries com.apple.security.get-task-allow. That runs on THIS
+# machine but AMFI kills it on any other Mac (launchd termination (27,1,9), a
+# codesigning SIGKILL), which is why a copied build never launches. Re-sign the
+# shipped bundle with a non-development identity and drop the entitlements
+# (omitting --entitlements removes get-task-allow; the app needs none — its
+# Accessibility / Input Monitoring access is granted via TCC, not entitlements).
+#
+# Default identity is the stable self-signed "Foretype Self-Signed" cert (see
+# CONTRIBUTING.md) — keyed to a cert, not a binary hash, so macOS keeps users'
+# permission grants across version updates. Override with DIST_SIGN_IDENTITY=-
+# for plain ad-hoc (runs everywhere too, but re-prompts on every update). The app
+# has no embedded frameworks/dylibs, so a single non-deep re-sign is sufficient.
+DIST_ID="${DIST_SIGN_IDENTITY:-Foretype Self-Signed}"
+echo "▸ Re-signing for distribution as: $DIST_ID"
+codesign --force --options runtime --timestamp=none --sign "$DIST_ID" "$APP"
+
 # --- 3. Verify signature -----------------------------------------------------
 echo "▸ Verifying signature…"
-codesign --verify --deep --strict --verbose=2 "$APP"
-codesign -dvv "$APP" 2>&1 | grep -E 'Identifier|TeamIdentifier|Authority=Apple' || true
+codesign --verify --strict --verbose=2 "$APP"
+# Guard against shipping a build that would SIGKILL on other Macs: it must not be
+# a development signature and must not carry get-task-allow.
+if codesign -dvv "$APP" 2>&1 | grep -q 'Apple Development'; then
+  echo "✗ Still signed with Apple Development — would SIGKILL on other Macs"; exit 1
+fi
+if codesign -d --entitlements - "$APP" 2>&1 | grep -q 'get-task-allow'; then
+  echo "✗ get-task-allow still present — would SIGKILL on other Macs"; exit 1
+fi
+codesign -dvv "$APP" 2>&1 | grep -E 'Identifier|Authority|Signature' || true
 
 # --- 4. Zip (archive contains Foretype.app at its root) ----------------------
 echo "▸ Packaging ${ZIP_NAME}…"

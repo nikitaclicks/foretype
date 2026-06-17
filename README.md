@@ -1,13 +1,16 @@
 # Foretype
 
+<!-- DEMO VIDEO: replace the URL below with the github.com/user-attachments URL
+     you get by dragging ~/Documents/foretype.mov into a GitHub issue/comment box.
+     Keep it on its own line with blank lines around it so GitHub renders a player. -->
+
+https://github.com/user-attachments/assets/REPLACE_ME
+
 Foretype is a macOS menu bar app that provides **on-device-aware inline
 autocomplete in any text field**. It watches which text field is focused
 through Accessibility, observes typing through a global keyboard tap, asks a
 language model for a short continuation, renders that continuation as **ghost
 text** next to the caret, and inserts it when the user presses `Tab`.
-
-## Demo
-https://github.com/user-attachments/assets/1c1a7aa1-4e0a-414d-8e0f-5bd851a34a04
 
 It runs as a lightweight background agent (no dock icon, no main window). It
 supports two completion backends:
@@ -42,9 +45,8 @@ and installs the latest release into `/Applications`. To upgrade later:
 Foretype is **not notarized**, and by installing it you acknowledge that. The
 Homebrew cask removes the `com.apple.quarantine` attribute on install, so the app
 launches without any Gatekeeper "unidentified developer" warning — and **without
-disabling SIP**. It is still signed with a real Apple Development identity, which
-is what lets macOS keep your Accessibility / Input Monitoring grants across
-updates.
+disabling SIP**. It is signed with a stable self-signed certificate, which is what
+lets macOS keep your Accessibility / Input Monitoring grants across updates.
 
 If you'd rather download the `.zip` manually from the
 [Releases](https://github.com/nikitaclicks/foretype/releases) page, macOS will

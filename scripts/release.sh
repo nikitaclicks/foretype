@@ -6,11 +6,13 @@
 #   ./scripts/release.sh 0.1.0   # publish that exact artifact
 #   ./scripts/release.sh --force 0.1.0   # recover from a half-published release
 #
-# Distribution model (AeroSpace-style): the app is NOT notarized. The Homebrew
-# cask strips com.apple.quarantine on install so it launches without Gatekeeper
-# warnings. The build signs with the project's real Apple Development identity
-# (not ad-hoc) so macOS keeps the Accessibility / Input Monitoring grants across
-# updates — TCC keys them to the signing team + bundle id.
+# Distribution model: the app is NOT notarized. The Homebrew cask strips
+# com.apple.quarantine on install so it launches without Gatekeeper warnings.
+# build.sh re-signs the shipped bundle with a stable self-signed certificate
+# (NOT the Apple Development cert used for local dev — that's a development
+# signature with get-task-allow that AMFI kills on other Macs). The self-signed
+# cert is keyed to the cert (not the binary hash), so macOS keeps the
+# Accessibility / Input Monitoring grants across updates.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO_ROOT="$PWD"

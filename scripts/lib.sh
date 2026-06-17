@@ -56,8 +56,9 @@ cask "foretype" do
 
   app "${APP_NAME}.app"
 
-  # Not notarized (AeroSpace-style): strip the quarantine flag on install so the
-  # app launches without a Gatekeeper "unidentified developer" block.
+  # Not notarized: the bundle is signed with a stable self-signed certificate,
+  # so strip the quarantine flag on install so the app launches without a
+  # Gatekeeper "unidentified developer" block.
   postflight do
     system "xattr", "-dr", "com.apple.quarantine", "#{appdir}/${APP_NAME}.app"
   end
