@@ -1,10 +1,8 @@
 # Foretype
 
-<!-- DEMO VIDEO: replace the URL below with the github.com/user-attachments URL
-     you get by dragging ~/Documents/foretype.mov into a GitHub issue/comment box.
-     Keep it on its own line with blank lines around it so GitHub renders a player. -->
+## Demo
 
-https://github.com/user-attachments/assets/REPLACE_ME
+https://github.com/user-attachments/assets/1c1a7aa1-4e0a-414d-8e0f-5bd851a34a04
 
 Foretype is a macOS menu bar app that provides **on-device-aware inline
 autocomplete in any text field**. It watches which text field is focused
