@@ -147,10 +147,10 @@ fi
 git push origin HEAD --tags
 
 # --- GitHub Release (uploads the artifact you built & tested) ----------------
-# --clobber makes this idempotent: if gh release create fails midway, re-running
-# the script (with --force) will succeed. --verify-tag uses the local tag we just pushed.
+# If gh release create fails midway, re-run with --force to delete the orphaned
+# tag and retry. --verify-tag ensures the tag exists remotely before proceeding.
 gh release create "v$VERSION" "$ZIP_PATH" \
-  --repo "$REPO" --title "v$VERSION" --generate-notes --clobber
+  --repo "$REPO" --title "v$VERSION" --generate-notes --verify-tag
 
 echo
 echo "✓ Released v$VERSION → https://github.com/${REPO}/releases/tag/v$VERSION"
